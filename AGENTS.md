@@ -1,4 +1,10 @@
-# 项目上下文
+# 商务标报价系统 - AGENTS.md
+
+## 项目概述
+
+商务标报价辅助系统，支持8步报价流程：分析招标文件 → 清单组价 → 限价对比 → 不平衡报价策略 → 清单调价配平 → 材料调价配平 → 调价导出 → 投标复盘。
+
+核心能力：自研公式引擎（2787个Excel公式零错误计算）、Excel多Sheet导入导出、AI辅助提取与策略判断、三级配平算法。
 
 ### 版本技术栈
 
@@ -7,59 +13,107 @@
 - **Language**: TypeScript 5
 - **UI 组件**: shadcn/ui (基于 Radix UI)
 - **Styling**: Tailwind CSS 4
+- **表格**: AG Grid Community（计划中，当前用原生table）
+- **Excel处理**: SheetJS (xlsx) + ExcelJS
+- **公式引擎**: 自研（src/lib/formula-engine/）
+- **AI**: coze-coding-dev-sdk LLMClient
+- **数据存储**: better-sqlite3（计划中）
 
 ## 目录结构
 
 ```
-├── public/                 # 静态资源
-├── scripts/                # 构建与启动脚本
-│   ├── build.sh            # 构建脚本
-│   ├── dev.sh              # 开发环境启动脚本
-│   ├── prepare.sh          # 预处理脚本
-│   └── start.sh            # 生产环境启动脚本
+├── public/
+│   └── test-data/          # 测试用Excel文件
 ├── src/
-│   ├── app/                # 页面路由与布局
-│   ├── components/ui/      # Shadcn UI 组件库
-│   ├── hooks/              # 自定义 Hooks
-│   ├── lib/                # 工具库
-│   │   └── utils.ts        # 通用工具函数 (cn)
-│   └── server.ts           # 自定义服务端入口
-├── next.config.ts          # Next.js 配置
-├── package.json            # 项目依赖管理
-└── tsconfig.json           # TypeScript 配置
+│   ├── app/
+│   │   ├── api/
+│   │   │   ├── formula-verify/   # 公式引擎验证API
+│   │   │   ├── formula-debug/    # 公式引擎调试API
+│   │   │   └── step1/
+│   │   │       ├── extract/      # 步骤1 AI提取（非流式）
+│   │   │       └── extract-stream/ # 步骤1 AI提取（SSE流式）
+│   │   ├── layout.tsx
+│   │   ├── page.tsx              # 主页面（8步骤导航+工作区）
+│   │   └── globals.css
+│   ├── components/
+│   │   ├── step-navigator.tsx    # 左侧8步骤导航条
+│   │   ├── formula-verify-panel.tsx # 公式引擎验证面板
+│   │   ├── steps/
+│   │   │   └── step1-panel.tsx   # 步骤1工作面板
+│   │   └── ui/                   # shadcn/ui 组件库
+│   └── lib/
+│       ├── formula-engine/       # ⭐ 核心公式引擎
+│       │   ├── types.ts          # 类型定义（CellValue, ASTNode等）
+│       │   ├── cell-utils.ts     # 单元格工具（列号转换、范围规范化）
+│       │   ├── parser.ts         # 公式解析器（支持12种函数+跨Sheet引用+&连接符）
+│       │   ├── evaluator.ts      # 公式求值器（递归依赖计算+整列引用）
+│       │   ├── excel-reader.ts   # Excel文件读取（ExcelJS，含共享公式处理）
+│       │   ├── engine.ts         # FormulaEngine主类（拓扑排序+批量计算+比对）
+│       │   └── index.ts          # 统一导出
+│       └── utils.ts
+├── DESIGN.md                     # 设计规范
+├── next.config.ts
+├── package.json
+└── tsconfig.json
 ```
 
-- 项目文件（如 app 目录、pages 目录、components 等）默认初始化到 `src/` 目录下。
+## 关键模块说明
+
+### 公式引擎 (src/lib/formula-engine/)
+
+- **解析器**: 支持 SUM, ROUND, IF, IFERROR, INDEX, MATCH, SUMIF, SUMPRODUCT, OR, FIND, LEFT, TRIM + 字符串连接符`&` + 双否定`--` + 整列引用`$A:$A` + 跨Sheet引用`'Sheet名'!`
+- **求值器**: 递归依赖计算（未计算的公式单元格会自动触发计算），循环检测
+- **引擎主类**: ExcelJS读取 → 解析所有公式 → 批量计算 → 与Excel缓存值比对
+- **验证结果**: 2787个公式，0错误，合计加总差额 < 1e-8
+
+### 步骤1 (step1)
+
+- AI提取招标文件商务条款（8大分类57行）
+- 支持非流式(/api/step1/extract)和SSE流式(/api/step1/extract-stream)
+- 表格式编辑界面
+- 导出Excel（待实现）
 
 ## 包管理规范
 
-**仅允许使用 pnpm** 作为包管理器，**严禁使用 npm 或 yarn**。
-**常用命令**：
-- 安装依赖：`pnpm add <package>`
-- 安装开发依赖：`pnpm add -D <package>`
-- 安装所有依赖：`pnpm install`
-- 移除依赖：`pnpm remove <package>`
+**仅允许使用 pnpm**，严禁使用 npm 或 yarn。
 
 ## 开发规范
 
 ### 编码规范
 
-- 默认按 TypeScript `strict` 心智写代码；优先复用当前作用域已声明的变量、函数、类型和导入，禁止引用未声明标识符或拼错变量名。
-- 禁止隐式 `any` 和 `as any`；函数参数、返回值、解构项、事件对象、`catch` 错误在使用前应有明确类型或先完成类型收窄，并清理未使用的变量和导入。
+- TypeScript strict 模式
+- 禁止隐式 any 和 as any
+- 函数参数、返回值必须有类型标注
+- 清理未使用的变量和导入
 
 ### next.config 配置规范
 
-- 配置的路径不要写死绝对路径，必须使用 path.resolve(__dirname, ...)、import.meta.dirname 或 process.cwd() 动态拼接。
+- 配置路径使用 `path.resolve(__dirname, ...)` 动态拼接，禁止硬编码绝对路径
 
 ### Hydration 问题防范
 
-1. 严禁在 JSX 渲染逻辑中直接使用 typeof window、Date.now()、Math.random() 等动态数据。**必须使用 'use client' 并配合 useEffect + useState 确保动态内容仅在客户端挂载后渲染**；同时严禁非法 HTML 嵌套（如 <p> 嵌套 <div>）。
-2. **禁止使用 head 标签**，优先使用 metadata，详见文档：https://nextjs.org/docs/app/api-reference/functions/generate-metadata
-   1. 三方 CSS、字体等资源可在 `globals.css` 中顶部通过 `@import` 引入或使用 next/font
-   2. preload, preconnect, dns-prefetch 通过 ReactDOM 的 preload、preconnect、dns-prefetch 方法引入
-   3. json-ld 可阅读 https://nextjs.org/docs/app/guides/json-ld
+- 严禁 JSX 渲染逻辑中使用 typeof window、Date.now()、Math.random()
+- 必须用 'use client' + useEffect + useState 确保动态内容仅客户端渲染
+- 禁止非法 HTML 嵌套（如 `<p>` 嵌套 `<div>`）
 
-## UI 设计与组件规范 (UI & Styling Standards)
+### 公式引擎开发规范
 
-- 模板默认预装核心组件库 `shadcn/ui`，位于`src/components/ui/`目录下
-- Next.js 项目**必须默认**采用 shadcn/ui 组件、风格和规范，**除非用户指定用其他的组件和规范。**
+- 新增函数支持：在 parser.ts 的 `isKnownFunction` 中注册 → 在 evaluator.ts 的 `evaluateFunction` 中实现
+- 跨Sheet引用：Sheet名含特殊字符时需用单引号包裹，如 `'综合单价分析表【道路工程】'!A1`
+- 整列引用（如 `$A:$A`）：row=0 表示整列，`normalizeRange` 会自动替换为实际数据范围
+- 共享公式：ExcelJS 的 `cell.value` 可能是 `{formula: string}` 对象而非 Formula 类型，需用 `extractFormula()` 兼容处理
+
+## 测试验证
+
+```bash
+# 公式引擎验证
+curl -s http://localhost:5000/api/formula-verify
+
+# 公式引擎调试（查看指定Sheet数据）
+curl -s 'http://localhost:5000/api/formula-debug?sheet=汇总表&maxRow=20'
+
+# 步骤1 AI提取（需要AI配额）
+curl -s -X POST -H 'Content-Type: application/json' \
+  -d '{"content":"招标文件文本内容"}' \
+  http://localhost:5000/api/step1/extract
+```
