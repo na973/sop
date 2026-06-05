@@ -1,6 +1,4 @@
-# projects
-
-这是一个基于 [Next.js 16](https://nextjs.org) + [shadcn/ui](https://ui.shadcn.com) 的全栈应用项目，由扣子编程 CLI 创建。
+# 商务标报价辅助系统 (SOP)
 
 ## 快速开始
 
@@ -361,3 +359,4 @@ export const useStore = create<Store>((set) => ({
 3. **遵循 Next.js App Router 规范**，正确区分服务端/客户端组件
 4. **使用 TypeScript** 进行类型安全开发
 5. **使用 `@/` 路径别名** 导入模块（已配置）
+
