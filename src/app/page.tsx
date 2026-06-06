@@ -3,6 +3,9 @@
 import { useState } from 'react';
 import StepNavigator from '@/components/step-navigator';
 import Step1Panel from '@/components/steps/step1-panel';
+import Step2Panel from '@/components/steps/step2-panel';
+import Step5Panel from '@/components/steps/step5-panel';
+import Step6Panel from '@/components/steps/step6-panel';
 import FormulaVerifyPanel from '@/components/formula-verify-panel';
 
 const STEPS = [
@@ -34,10 +37,22 @@ export default function Home() {
       case 1:
         return <Step1Panel onComplete={() => handleStepComplete(1)} />;
       case 2:
+        return <Step2Panel />;
       case 3:
       case 4:
+        return (
+          <div className="flex items-center justify-center h-full text-slate-400">
+            <div className="text-center">
+              <div className="text-6xl font-bold mb-4 text-slate-200">{currentStep}</div>
+              <p className="text-lg">{STEPS[currentStep - 1].label}</p>
+              <p className="text-sm mt-2">此步骤尚未开发</p>
+            </div>
+          </div>
+        );
       case 5:
+        return <Step5Panel />;
       case 6:
+        return <Step6Panel />;
       case 7:
       case 8:
         return (
