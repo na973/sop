@@ -7,8 +7,9 @@ import type { CellValue } from '@/lib/formula-engine/types';
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { table7FileBase64, maxPriceTotal, targetDiscountRate, strategyRules, filePath } = body as {
+    const { table7FileBase64, fileBase64, maxPriceTotal, targetDiscountRate, strategyRules, filePath } = body as {
       table7FileBase64?: string;
+      fileBase64?: string;
       maxPriceTotal?: number;
       targetDiscountRate?: number;
       strategyRules?: Array<{ row: number; strategy: string; category: string }>;
@@ -24,13 +25,14 @@ export async function POST(request: NextRequest) {
 
     // 1. 读取表7（支持base64或filePath）
     let arrayBuffer: ArrayBuffer;
+    const base64 = fileBase64 || table7FileBase64;
     if (filePath) {
       const fs = await import('fs');
       const buf = fs.readFileSync(filePath);
-      arrayBuffer = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
-    } else if (table7FileBase64) {
-      const buffer = Buffer.from(table7FileBase64, 'base64');
-      arrayBuffer = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+      arrayBuffer = new Uint8Array(buf).buffer;
+    } else if (base64) {
+      const buffer = Buffer.from(base64, 'base64');
+      arrayBuffer = new Uint8Array(buffer).buffer;
     } else {
       return NextResponse.json({ success: false, error: '请提供表7文件（filePath或base64）' }, { status: 400 });
     }
@@ -169,7 +171,7 @@ function validateConstraints(
 }
 
 /** 从工作簿提取所有清单条目 */
-function extractAllItems(calcWb: Map<string, Map<string, { value: CellValue; isFormula: boolean; formula?: string }>>) {
+function extractAllItems(calcWb: Map<string, Map<string, { value: CellValue | undefined; isFormula: boolean; formula?: string }>>) {
   const categories = [
     { sheet: '综合单价分析表【道路工程】', category: '道路工程' },
     { sheet: '综合单价分析表【桥梁工程】', category: '桥梁工程' },

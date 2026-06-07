@@ -16,8 +16,9 @@ function toNum(v: CellValue | undefined): number {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { table7FileBase64, balancedItems, maxIterations = 100, tolerance = 10, filePath } = body as {
+    const { table7FileBase64, fileBase64, balancedItems, maxIterations = 100, tolerance = 10, filePath } = body as {
       table7FileBase64?: string;
+      fileBase64?: string;
       balancedItems?: Array<{
         row: number; category: string; code: string; name: string;
         quantity: number; targetUnitPrice: number; targetTotalPrice: number;
@@ -36,11 +37,12 @@ export async function POST(request: NextRequest) {
 
     // 1. 读取表7（支持base64或filePath）
     let fileBuffer: Buffer;
+    const base64 = fileBase64 || table7FileBase64;
     if (filePath) {
       const fs = await import('fs');
       fileBuffer = fs.readFileSync(filePath);
-    } else if (table7FileBase64) {
-      fileBuffer = Buffer.from(table7FileBase64, 'base64');
+    } else if (base64) {
+      fileBuffer = Buffer.from(base64, 'base64');
     } else {
       return NextResponse.json({ success: false, error: '请提供表7文件（filePath或base64）' }, { status: 400 });
     }

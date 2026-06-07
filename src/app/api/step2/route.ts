@@ -8,7 +8,7 @@ export async function POST(request: NextRequest) {
   try {
     let arrayBuffer: ArrayBuffer;
 
-    // 支持两种方式：formData上传文件 或 JSON传入filePath（便于测试）
+    // 支持三种方式：formData上传文件 / JSON传入fileBase64 / JSON传入filePath
     const contentType = request.headers.get('content-type') || '';
     if (contentType.includes('multipart/form-data')) {
       const formData = await request.formData();
@@ -17,16 +17,20 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ success: false, error: '请上传清单组价表Excel文件' }, { status: 400 });
       }
       const buffer = Buffer.from(await file.arrayBuffer());
-      arrayBuffer = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+      arrayBuffer = new Uint8Array(buffer).buffer;
     } else {
       const body = await request.json();
-      const filePath = body.filePath as string | undefined;
-      if (!filePath) {
-        return NextResponse.json({ success: false, error: '请上传文件或提供filePath' }, { status: 400 });
+      const { filePath, fileBase64 } = body as { filePath?: string; fileBase64?: string };
+      if (fileBase64) {
+        const buffer = Buffer.from(fileBase64, 'base64');
+        arrayBuffer = new Uint8Array(buffer).buffer;
+      } else if (filePath) {
+        const fs = await import('fs');
+        const buffer = fs.readFileSync(filePath);
+        arrayBuffer = new Uint8Array(buffer).buffer;
+      } else {
+        return NextResponse.json({ success: false, error: '请上传文件或提供filePath/fileBase64' }, { status: 400 });
       }
-      const fs = await import('fs');
-      const buffer = fs.readFileSync(filePath);
-      arrayBuffer = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
     }
 
     // 1. 读取Excel
@@ -64,22 +68,23 @@ export async function POST(request: NextRequest) {
   }
 }
 
-/** 提取汇总表 */
-function extractSummary(sheet: Map<string, { value: CellValue; isFormula: boolean; formula?: string }> | undefined) {
-  if (!sheet) return null;
-  const rows: Array<{ key: string; content: string; amount: number }> = [];
+/** 提取汇总表 — 返回 {key: amount} 格式 */
+function extractSummary(sheet: Map<string, { value: CellValue | undefined; isFormula: boolean; formula?: string }> | undefined): Record<string, number> {
+  if (!sheet) return {};
+  const result: Record<string, number> = {};
   for (const [key, cell] of sheet) {
     const [r, c] = key.split(',').map(Number);
     if (c === 2 && r > 1) { // B列 = 汇总内容
       const cVal = toNum(sheet.get(`${r},3`)?.value); // C列 = 金额
-      rows.push({ key: String(sheet.get(`${r},1`)?.value ?? ''), content: String(cell.value ?? ''), amount: cVal });
+      const content = String(cell.value ?? '').trim();
+      if (content) result[content] = cVal;
     }
   }
-  return rows;
+  return result;
 }
 
 /** 提取三条综合单价分析表的清单条目 */
-function extractBidItems(calcWb: Map<string, Map<string, { value: CellValue; isFormula: boolean; formula?: string }>>) {
+function extractBidItems(calcWb: Map<string, Map<string, { value: CellValue | undefined; isFormula: boolean; formula?: string }>>) {
   const bidItems: Array<{
     row: number;
     category: string;
@@ -137,7 +142,7 @@ function extractBidItems(calcWb: Map<string, Map<string, { value: CellValue; isF
  *  这里用表2结构
  */
 function extractResources(
-  sheet: Map<string, { value: CellValue; isFormula: boolean; formula?: string }>,
+  sheet: Map<string, { value: CellValue | undefined; isFormula: boolean; formula?: string }>,
   mainRow: number,
   allMainRows: number[],
 ): Array<{ row: number; code: string; name: string; type: string; consumption: number; unitPrice: number; totalPrice: number }> {
@@ -175,7 +180,7 @@ function extractResources(
 }
 
 /** 提取工料机汇总表 */
-function extractResourceSummary(calcWb: Map<string, Map<string, { value: CellValue; isFormula: boolean; formula?: string }>>) {
+function extractResourceSummary(calcWb: Map<string, Map<string, { value: CellValue | undefined; isFormula: boolean; formula?: string }>>) {
   const sheet = calcWb.get('工料机汇总表');
   if (!sheet) return [];
 
