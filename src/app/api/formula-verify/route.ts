@@ -5,6 +5,7 @@ import {
   readExcelToWorkbook,
   calculateWorkbook,
 } from '@/lib/formula-engine';
+import { getAnalysisSheets, getMainRows } from '@/lib/bidding/excel-sheets';
 
 export const dynamic = 'force-dynamic';
 
@@ -49,17 +50,18 @@ export async function GET() {
     const totalDiff = Math.abs(Number(c19) - expectedTotal);
     const totalConsistent = totalDiff < 0.01;
 
-    // 5. 抽样验证：取道路工程第一条清单，手动验算 G2 = ROUND(E2*F2, 2)
-    const roadSheet = result.get('综合单价分析表【道路工程】');
+    // 5. 抽样验证：取第一张综合单价分析表的第一条清单，手动验算 合价 = 工程量 × 综合单价
+    const firstAnalysisSheet = getAnalysisSheets(result)[0];
     let sampleCheck = null;
-    if (roadSheet) {
-      const e2 = roadSheet.get('2,5')?.value;  // 工程量
-      const f2 = roadSheet.get('2,6')?.value;  // 综合单价
-      const g2 = roadSheet.get('2,7')?.value;  // 合价
+    if (firstAnalysisSheet) {
+      const sampleRow = getMainRows(firstAnalysisSheet.data)[0];
+      const e2 = firstAnalysisSheet.data.get(`${sampleRow},5`)?.value;  // 工程量
+      const f2 = firstAnalysisSheet.data.get(`${sampleRow},6`)?.value;  // 综合单价
+      const g2 = firstAnalysisSheet.data.get(`${sampleRow},7`)?.value;  // 合价
       if (typeof e2 === 'number' && typeof f2 === 'number' && typeof g2 === 'number') {
         const expected = Math.round(e2 * f2 * 100) / 100;
         sampleCheck = {
-          item: '铣刨路面 (R2)',
+          item: `${firstAnalysisSheet.category} (R${sampleRow})`,
           工程量: e2,
           综合单价: f2,
           引擎合价: g2,

@@ -1,0 +1,250 @@
+SOP 项目交接说明 - 2026-06-08
+
+一、当前项目位置
+
+本地项目目录：
+c:\Users\Administrator\Desktop\商务标sop过程文件\1.增加公式\sop
+
+启动器：
+c:\Users\Administrator\Desktop\商务标sop过程文件\1.增加公式\启动SOP.cmd
+
+启动方式：
+双击“启动SOP.cmd”，它会进入 sop 目录，清理旧 .next，启动 pnpm.cmd dev，并打开 http://localhost:5000。
+
+注意：
+不要把聊天里出现过的 GitHub token 写入代码、文档或 git 提交。那些 token 应该在 GitHub 后台撤销。
+
+
+二、今天主要解决的问题
+
+1. 环境和启动问题
+
+- 本机已安装/使用 Node.js v20.18.3。
+- 本机已安装/使用 pnpm 9.0.0。
+- PowerShell 下优先用 pnpm.cmd，不直接用 pnpm，因为 pnpm.ps1 可能被执行策略拦截。
+- package.json 脚本已调整成 Windows 更友好：
+  - dev: tsx watch src/server.ts
+  - build: next build && tsup ...
+  - start: node dist/server.js
+  - validate: pnpm ts-check && pnpm lint:build
+- 已创建 Windows 启动器“启动SOP.cmd”，减少用户手动敲命令的成本。
+
+
+2. PDF 解析问题
+
+问题：
+Next 页面曾报 pdf-parse 默认导入不存在，以及 pdf.worker.mjs 找不到。
+
+处理：
+- step1/parse-pdf 改用 pdf-parse v2 的 PDFParse。
+- 通过 PDFParse.setWorker(pathToFileURL(getPdfWorkerPath()).href) 指定 worker。
+- next.config.ts 增加 serverExternalPackages:
+  - pdf-parse
+  - pdfjs-dist
+  - @napi-rs/canvas
+- parse-pdf route 设置 runtime = 'nodejs'。
+
+
+3. 自动识别工程表和不限条数
+
+目标：
+支持道路、排水、桥梁之外的工程，例如交安、路灯等。
+
+处理：
+- 新增 src/lib/bidding/excel-sheets.ts。
+- 自动扫描工作簿中的 “综合单价分析表【xxx】”。
+- category 不再写死为 road/bridge/drain，而是直接使用工作表里的工程名称。
+- 子项不再限制 mainRow + 20，而是扫描到下一个主清单行或工作表末尾。
+- 清单数量、工料机数量、子项数量理论上不再固定 20/118/800 等上限，取决于 Excel 实际内容和内存。
+
+
+4. 步骤2数据结构修复
+
+问题：
+后端返回的 summary 是对象 { 名称: 金额 }，但前端 app-state.tsx 曾声明成 SummaryRow[]。
+
+处理：
+- src/lib/app-state.tsx 中 Step2Data.summary 改为 Record<string, number>。
+- 步骤2 route 移除 filePath 本地任意读文件入口。
+- 步骤2 接收上传文件或 fileBase64。
+- 步骤2 自动读取所有 “综合单价分析表【xxx】”。
+
+
+5. 步骤3最高投标限价对比重做
+
+用户明确的业务口径：
+- 步骤2上传的是“表2 清单组价表(样例).xlsx”。
+- 步骤3上传的是另外两个文件：
+  - 最高投标限价文件（样例）.pdf
+  - 表3 分部分项工程量清单计价表（样例）.xlsx
+- 最高投标限价总金额不是用户手填，而是从 PDF 文件中提取。
+- 每条清单子目限价对比，应使用最高投标限价 PDF 中的综合单价，不应直接使用表3的单价。
+
+已完成处理：
+- src/app/api/step3/route.ts 重写。
+- 步骤3后端现在接收：
+  - bidItems: 步骤2生成的我方清单
+  - limitPdfBase64: 最高投标限价PDF
+  - limitBillFileBase64: 表3清单计价表
+- 从 PDF 汇总表中提取最高投标限价总金额。
+- 从 PDF 的“分部分项工程项目清单计价表”明细页解析每条清单：
+  - 项目编码
+  - 工程名称/分类
+  - 工程量
+  - 综合单价
+  - 合价
+- 表3现在主要作为清单结构参考和兜底。
+- 同一个项目编码如果 PDF 中识别到了，优先使用 PDF 的综合单价和合价。
+- 如果 PDF 某条没有识别到，才使用表3价格兜底。
+- 前端步骤3表格新增“来源”列：
+  - PDF：说明限价单价来自最高投标限价PDF
+  - 表3兜底：说明 PDF 未识别到该条，临时使用表3
+
+样例验证信息：
+- PDF 汇总表可提取最高投标限价总金额：13,183,424.34 元。
+- 表3样例共识别 118 条清单：
+  - 道路 86 条
+  - 桥梁 18 条
+  - 排水 14 条
+- PDF 明细中示例：
+  - 项目编码 041001004001
+  - PDF 综合单价为 38.41
+  - 表3里同编码单价为 15.54
+  - 修复后应优先显示 PDF 来源的 38.41，而不是表3的 15.54。
+
+
+6. 步骤5配平逻辑修复
+
+问题：
+原步骤5写着“暂用组价单价代替控制价单价”，不是真实控制价依据。
+
+处理：
+- src/components/steps/step5-panel.tsx 改为依赖步骤3结果。
+- src/app/api/step5/route.ts 改为接收 compareItems。
+- 配平所用 maxUnitPrice 来自步骤3的真实限价对比结果。
+- target total 仍按 maxPriceTotal 和目标下浮率计算。
+
+
+7. 步骤6材料调价逻辑改进
+
+问题：
+原步骤6是所有可调材料统一乘一个倍率，属于整体拉伸，不是逐清单精细调价。
+
+处理：
+- 移除 filePath。
+- 移除统一倍率二分法。
+- 改成 item-resource-allocation：
+  - 读取原始工作簿。
+  - 提取工料机汇总表中的可调材料。
+  - 建立清单到工料机资源映射。
+  - 对每条清单的目标差额，按资源消耗和材料原价权重分摊到材料价格。
+  - 汇总同一材料在多条清单中的调整量。
+  - 重新计算后返回 priceChanges、summary、validation。
+- app-state.tsx 的 Step6Data 移除 bestScaleFactor，增加 method。
+- 前端显示“调价方式：逐项分摊”。
+
+
+8. 步骤7导出逻辑改进
+
+处理：
+- 步骤7现在要求步骤6完成。
+- 前端把步骤6的 priceChanges 传给 /api/step7。
+- step7 route 不再接收 filePath 或 scaleFactor。
+- 导出时按材料编码匹配工料机汇总表，将调整后的材料价写入 F 列，再依赖工作簿公式传播。
+
+
+9. 安全问题
+
+处理：
+- 正式步骤2/3/5/6/7 已移除或避免 filePath 形式的任意本地文件读取。
+- 本地开发自己用问题不大，但如果以后部署成网站，仍需继续检查上传文件大小、文件类型、鉴权和日志脱敏。
+
+
+三、关键文件清单
+
+配置与启动：
+- package.json
+- pnpm-lock.yaml
+- next.config.ts
+- ../启动SOP.cmd
+
+全局状态：
+- src/lib/app-state.tsx
+
+通用 Excel 工程表识别：
+- src/lib/bidding/excel-sheets.ts
+- src/lib/bidding/types.ts
+
+步骤接口：
+- src/app/api/step1/parse-pdf/route.ts
+- src/app/api/step2/route.ts
+- src/app/api/step3/route.ts
+- src/app/api/step4/route.ts
+- src/app/api/step5/route.ts
+- src/app/api/step6/route.ts
+- src/app/api/step7/route.ts
+
+步骤页面：
+- src/components/steps/step2-panel.tsx
+- src/components/steps/step3-panel.tsx
+- src/components/steps/step4-panel.tsx
+- src/components/steps/step5-panel.tsx
+- src/components/steps/step6-panel.tsx
+- src/components/steps/step7-panel.tsx
+- src/components/steps/step8-panel.tsx
+
+公式验证：
+- src/app/api/formula-verify/route.ts
+- src/components/formula-verify-panel.tsx
+- src/lib/formula-engine/*
+
+
+四、当前验证结果
+
+已通过：
+- pnpm.cmd ts-check
+- pnpm.cmd lint:build
+
+启动建议：
+如果浏览器还是旧错误：
+1. 关闭旧黑窗口。
+2. 重新双击“启动SOP.cmd”。
+3. 等待服务重新启动。
+4. 浏览器强制刷新。
+
+
+五、后续建议
+
+1. 继续验证步骤3 PDF明细解析
+
+重点看步骤3表格“来源”列：
+- 理想情况：大多数或全部显示 PDF。
+- 如果很多显示“表3兜底”，说明 PDF 明细行没有被完全识别，需要针对实际 PDF 排版继续增强 parseLimitPdfItems。
+
+2. 重复项目编码风险
+
+当前步骤3主要按项目编码匹配。如果实际工程里存在重复编码，建议升级匹配键：
+- 项目编码 + 工程分类
+- 或 项目编码 + 项目名称
+- 或 项目编码 + 工程量近似匹配
+
+3. 扫描版 PDF 风险
+
+当前 PDF 解析依赖文本可提取。如果最高投标限价 PDF 是扫描图片版，需要接 OCR，否则读不到明细。
+
+4. 步骤6仍不是完整数学优化器
+
+当前材料调价是“逐项差额按资源权重分摊”的实用第一版。若后面要正式用于报价策略，建议继续加：
+- 材料单价上下限
+- 单条清单最高限价约束
+- 不平衡报价策略约束
+- 多目标优化或线性规划
+
+5. Git 注意
+
+本工作区因为手动下载/覆盖过仓库，git status 里可能有很多换行符或历史文件差异。提交时要注意不要提交：
+- node_modules
+- .next
+- 用户上传样例之外的敏感文件
+- 任何 GitHub token
+

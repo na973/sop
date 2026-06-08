@@ -13,6 +13,7 @@ import {
   CellData,
 } from './types';
 import { cellKey, crossCellKey, letterToCol } from './cell-utils';
+import { parseFormula } from './parser';
 
 /** 公式错误值，继承自 Error 以兼容 CellValue 类型 */
 class FormulaError extends Error {
@@ -158,26 +159,12 @@ export function evaluate(node: ASTNode, ctx: FormulaContext): CellValue {
 function resolveRangeFirst(ctx: FormulaContext, startRow: number, startCol: number, endRow: number, endCol: number): CellValue {
   const sheet = ctx.workbook.get(ctx.currentSheet);
   if (!sheet) return REF_ERROR;
-  const key = cellKey(startRow, startCol);
-  const cell = sheet.get(key);
-  if (!cell) return null;
-  if (cell.isFormula && cell.value === undefined) {
-    return resolveCellRef(ctx, startRow, startCol);
-  }
-  return cell.value;
+  return resolveCellRef(ctx, startRow, startCol);
 }
 
 /** 解析跨Sheet范围，返回第一个单元格的值 */
 function resolveCrossSheetRangeFirst(ctx: FormulaContext, sheetName: string, startRow: number, startCol: number, endRow: number, endCol: number): CellValue {
-  const sheet = ctx.workbook.get(sheetName);
-  if (!sheet) return REF_ERROR;
-  const key = cellKey(startRow, startCol);
-  const cell = sheet.get(key);
-  if (!cell) return null;
-  if (cell.isFormula && cell.value === undefined) {
-    return resolveCrossSheetCell(ctx, sheetName, startRow, startCol);
-  }
-  return cell.value;
+  return resolveCrossSheetCell(ctx, sheetName, startRow, startCol);
 }
 
 function resolveCellRef(ctx: FormulaContext, row: number, col: number): CellValue {
@@ -199,11 +186,12 @@ function resolveCellRef(ctx: FormulaContext, row: number, col: number): CellValu
   const cell = sheet.get(key);
   if (!cell) return null;
 
-  // 如果是公式且尚未计算，先计算
-  if (cell.isFormula && cell.value === undefined) {
+  // 如果是公式且缓存未命中，需要（重新）计算
+  // 注意：不使用 cell.value === undefined 判断，因为 calculateWorkbook 重算时
+  // 公式单元格的value可能还是上次的旧值（被设为null标记或残留旧值）
+  if (cell.isFormula) {
     ctx.computing.add(fullKey);
     try {
-      const { parseFormula } = require('./parser');
       const ast = parseFormula(cell.formula!);
       cell.value = evaluate(ast, ctx);
     } catch (e) {
@@ -244,12 +232,11 @@ function resolveCrossSheetCell(ctx: FormulaContext, sheetName: string, row: numb
   const cell = sheet.get(key);
   if (!cell) return null;
 
-  if (cell.isFormula && cell.value === undefined) {
+  if (cell.isFormula) {
     ctx.computing.add(fullKey);
     const oldSheet = ctx.currentSheet;
     ctx.currentSheet = sheetName;
     try {
-      const { parseFormula } = require('./parser');
       const ast = parseFormula(cell.formula!);
       cell.value = evaluate(ast, ctx);
     } catch (e) {
@@ -524,6 +511,31 @@ function fnIndex(args: ASTNode[], ctx: FormulaContext): CellValue {
   return matrix[r][c];
 }
 
+/** Excel通配符匹配：*匹配0+字符，?匹配1个字符，~转义 */
+function excelWildcardMatch(pattern: string, text: string): boolean {
+  // 将Excel通配符模式转为正则表达式
+  let regex = '';
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i];
+    if (ch === '~' && i + 1 < pattern.length) {
+      // 转义下一个字符（~* → 字面*, ~? → 字面?）
+      regex += pattern[i + 1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      i++;
+    } else if (ch === '*') {
+      regex += '.*';
+    } else if (ch === '?') {
+      regex += '.';
+    } else {
+      regex += ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+  }
+  try {
+    return new RegExp('^' + regex + '$', 'i').test(text);
+  } catch {
+    return false;
+  }
+}
+
 function fnMatch(args: ASTNode[], ctx: FormulaContext): CellValue {
   if (args.length < 2) return VALUE_ERROR;
   const lookupVal = evaluate(args[0], ctx);
@@ -531,11 +543,11 @@ function fnMatch(args: ASTNode[], ctx: FormulaContext): CellValue {
   const matchType = args.length > 2 ? toNumber(evaluate(args[2], ctx)) : 1;
 
   if (matchType === 0) {
-    // 精确匹配
+    // 精确匹配（支持Excel通配符：*匹配0+字符，?匹配1个字符）
     for (let i = 0; i < vals.length; i++) {
       const v = vals[i];
       if (typeof lookupVal === 'string' && typeof v === 'string') {
-        if (v.toLowerCase().includes(lookupVal.toLowerCase())) return i + 1;
+        if (excelWildcardMatch(lookupVal, v)) return i + 1;
       } else if (v === lookupVal) {
         return i + 1;
       }
@@ -929,11 +941,7 @@ function matchesCriteria(cellVal: CellValue, criteria: CellValue): boolean {
 
   // 通配符匹配
   if (critStr.includes('*') || critStr.includes('?')) {
-    const regex = new RegExp(
-      '^' + critStr.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.') + '$',
-      'i'
-    );
-    return regex.test(toString(cellVal));
+    return excelWildcardMatch(critStr, toString(cellVal));
   }
 
   // 精确匹配
