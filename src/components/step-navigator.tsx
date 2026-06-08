@@ -51,18 +51,17 @@ export default function StepNavigator({ activeStep, onStepChange }: Props) {
           const step = i + 1;
           const isActive = step === activeStep;
           const isCompleted = isStepCompleted(step);
-          const isDisabled = step > 2 && !isStepCompleted(step - 1) && !isCompleted;
+          const needsPrerequisite = step > 2 && !isStepCompleted(step - 1) && !isCompleted;
 
           return (
             <button
               key={step}
-              onClick={() => !isDisabled && onStepChange(step)}
-              disabled={isDisabled}
+              onClick={() => onStepChange(step)}
               className={`w-full flex items-center gap-3 px-4 py-2.5 text-left transition-colors
                 ${isActive ? 'bg-amber-500/20 text-amber-300' : ''}
                 ${isCompleted && !isActive ? 'text-slate-300 hover:bg-slate-700' : ''}
-                ${!isCompleted && !isActive && !isDisabled ? 'text-slate-400 hover:bg-slate-700/50' : ''}
-                ${isDisabled ? 'text-slate-600 cursor-not-allowed' : ''}
+                ${!isCompleted && !isActive && !needsPrerequisite ? 'text-slate-400 hover:bg-slate-700/50' : ''}
+                ${!isCompleted && !isActive && needsPrerequisite ? 'text-slate-500 hover:bg-slate-700/30' : ''}
               `}
             >
               {/* 步骤编号/完成标记 */}

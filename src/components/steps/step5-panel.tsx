@@ -7,8 +7,8 @@ export default function Step5Panel() {
   const { state, updateState } = useAppState();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [maxPriceTotal, setMaxPriceTotal] = useState<number>(38000000);
-  const [targetDiscountRate, setTargetDiscountRate] = useState<number>(0.05);
+  const maxPriceTotal = state.maxPriceTotal || 38000000;
+  const targetDiscountRate = state.targetDiscountRate || 0.05;
 
   const handleCalculate = async () => {
     if (!state.fileBase64) {
@@ -53,7 +53,7 @@ export default function Step5Panel() {
           <input
             type="number"
             value={maxPriceTotal}
-            onChange={(e) => setMaxPriceTotal(Number(e.target.value))}
+            onChange={(e) => updateState({ maxPriceTotal: Number(e.target.value) })}
             className="w-32 px-2 py-1 text-xs border rounded font-mono"
           />
         </div>
@@ -63,7 +63,7 @@ export default function Step5Panel() {
             type="number"
             step="0.01"
             value={targetDiscountRate}
-            onChange={(e) => setTargetDiscountRate(Number(e.target.value))}
+            onChange={(e) => updateState({ targetDiscountRate: Number(e.target.value) })}
             className="w-20 px-2 py-1 text-xs border rounded font-mono"
           />
         </div>
