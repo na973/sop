@@ -25,14 +25,14 @@ export default function StepNavigator({ activeStep, onStepChange }: Props) {
 
   const isStepCompleted = (step: number): boolean => {
     switch (step) {
-      case 1: return state.step1Completed;
+      case 1: return !!state.step1Data;
       case 2: return !!state.step2Data;
-      case 3: return !!state.step3Data;
-      case 4: return !!state.step4Data;
+      case 3: return !!state.step3Data?.length;
+      case 4: return !!state.step4Data?.length;
       case 5: return !!state.step5Data;
       case 6: return !!state.step6Data;
-      case 7: return state.step7Completed;
-      case 8: return state.step7Completed; // step8 is always accessible if step7 done
+      case 7: return !!state.step7FileBase64;
+      case 8: return !!state.step7FileBase64;
       default: return false;
     }
   };
@@ -51,7 +51,6 @@ export default function StepNavigator({ activeStep, onStepChange }: Props) {
           const step = i + 1;
           const isActive = step === activeStep;
           const isCompleted = isStepCompleted(step);
-          const needsPrerequisite = step > 2 && !isStepCompleted(step - 1) && !isCompleted;
 
           return (
             <button
@@ -60,8 +59,7 @@ export default function StepNavigator({ activeStep, onStepChange }: Props) {
               className={`w-full flex items-center gap-3 px-4 py-2.5 text-left transition-colors
                 ${isActive ? 'bg-amber-500/20 text-amber-300' : ''}
                 ${isCompleted && !isActive ? 'text-slate-300 hover:bg-slate-700' : ''}
-                ${!isCompleted && !isActive && !needsPrerequisite ? 'text-slate-400 hover:bg-slate-700/50' : ''}
-                ${!isCompleted && !isActive && needsPrerequisite ? 'text-slate-500 hover:bg-slate-700/30' : ''}
+                ${!isCompleted && !isActive ? 'text-slate-400 hover:bg-slate-700/50' : ''}
               `}
             >
               {/* 步骤编号/完成标记 */}
@@ -87,9 +85,9 @@ export default function StepNavigator({ activeStep, onStepChange }: Props) {
         <div className="text-xs text-slate-500">
           进度：{STEP_LABELS.filter((_, i) => isStepCompleted(i + 1)).length}/{STEP_LABELS.length}
         </div>
-        {state.fileName && (
-          <div className="text-xs text-slate-400 mt-1 truncate" title={state.fileName}>
-            {state.fileName}
+        {state.fileLibrary.length > 0 && (
+          <div className="text-xs text-slate-400 mt-1 truncate">
+            文件库：{state.fileLibrary.length} 个文件
           </div>
         )}
       </div>

@@ -1,19 +1,20 @@
 'use client';
 
 import { useState, useCallback } from 'react';
-import { AppProvider } from '@/lib/app-state';
+import { AppProvider, useAppState } from '@/lib/app-state';
 import StepNavigator from '@/components/step-navigator';
-import Step1Panel from '@/components/steps/step1-panel';
-import Step2Panel from '@/components/steps/step2-panel';
-import Step3Panel from '@/components/steps/step3-panel';
-import Step4Panel from '@/components/steps/step4-panel';
-import Step5Panel from '@/components/steps/step5-panel';
-import Step6Panel from '@/components/steps/step6-panel';
-import Step7Panel from '@/components/steps/step7-panel';
-import Step8Panel from '@/components/steps/step8-panel';
+import { Step1Panel } from '@/components/steps/step1-panel';
+import { Step2Panel } from '@/components/steps/step2-panel';
+import { Step3Panel } from '@/components/steps/step3-panel';
+import { Step4Panel } from '@/components/steps/step4-panel';
+import { Step5Panel } from '@/components/steps/step5-panel';
+import { Step6Panel } from '@/components/steps/step6-panel';
+import { Step7Panel } from '@/components/steps/step7-panel';
+import { Step8Panel } from '@/components/steps/step8-panel';
 
 function AppContent() {
   const [activeStep, setActiveStep] = useState(1);
+  const { state } = useAppState();
 
   const handleStepChange = useCallback((step: number) => {
     setActiveStep(step);
@@ -33,6 +34,8 @@ function AppContent() {
     }
   };
 
+  const fileCount = state.fileLibrary.length;
+
   return (
     <div className="h-screen flex bg-[#f8fafc]">
       {/* 左侧导航 */}
@@ -46,12 +49,19 @@ function AppContent() {
           <span className="mx-3 text-slate-300">|</span>
           <span className="text-xs text-slate-500">步骤 {activeStep}/8</span>
           <div className="flex-1" />
-          <span className="text-xs text-slate-400">v1.0</span>
+          {fileCount > 0 && (
+            <span className="text-xs text-slate-500 mr-4">
+              文件库：{fileCount} 个文件
+            </span>
+          )}
+          <span className="text-xs text-slate-400">v2.0</span>
         </header>
 
         {/* 工作面板 */}
-        <div className="flex-1 overflow-hidden">
-          {renderPanel()}
+        <div className="flex-1 overflow-auto">
+          <div className="max-w-4xl mx-auto p-6">
+            {renderPanel()}
+          </div>
         </div>
       </main>
     </div>

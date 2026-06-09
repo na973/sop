@@ -1,196 +1,155 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import { useAppState, type StrategyItem } from '@/lib/app-state';
-
-const FORECAST_OPTIONS = ['明确增加', '可能增加', '基本一致/不确定', '可能减少', '明确减少'];
-const OPTIMIZATION_OPTIONS = ['不能优化', '少量优化', '中等优化', '较多优化', '大量优化'];
+import { downloadBase64File, fmt } from '@/lib/export-utils';
+import { exportToExcel } from '@/lib/export-utils';
 
 const STRATEGY_COLORS: Record<string, string> = {
-  '极高': 'bg-rose-100 text-rose-700',
-  '高': 'bg-orange-100 text-orange-700',
-  '平均偏高': 'bg-amber-100 text-amber-700',
-  '平均': 'bg-slate-100 text-slate-700',
-  '平均偏低': 'bg-blue-100 text-blue-700',
-  '低': 'bg-indigo-100 text-indigo-700',
-  '极低': 'bg-purple-100 text-purple-700',
+  '极高': 'text-red-700 bg-red-100',
+  '高': 'text-orange-700 bg-orange-100',
+  '平均偏高': 'text-amber-700 bg-amber-100',
+  '平均': 'text-green-700 bg-green-100',
+  '平均偏低': 'text-blue-700 bg-blue-100',
+  '低': 'text-indigo-700 bg-indigo-100',
+  '极低': 'text-purple-700 bg-purple-100',
 };
 
-export default function Step4Panel() {
+export function Step4Panel() {
   const { state, updateState } = useAppState();
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [overrides, setOverrides] = useState<Record<number, { quantityForecast: string; optimization: string }>>({});
-  const [filterStrategy, setFilterStrategy] = useState<string>('全部');
+  const [error, setError] = useState('');
 
-  const handleCalculate = async () => {
-    if (!state.step3Data?.length) {
-      setError('请先完成步骤3限价对比');
+  const step3Data = state.step3Data;
+  const step4Data = state.step4Data;
+
+  const handleStrategy = useCallback(async () => {
+    if (!step3Data || step3Data.length === 0) {
+      setError('请先在步骤3中执行限价对比');
       return;
     }
-
     setLoading(true);
-    setError(null);
+    setError('');
     try {
-      // 构建compareItems和overrides
-      const compareItems = state.step3Data.map((item) => ({
-        row: item.row,
-        category: item.category,
-        code: item.code,
-        name: item.name,
-        unit: item.unit,
-        quantity: item.quantity,
-        ourUnitPrice: item.ourUnitPrice,
-        maxUnitPrice: item.maxUnitPrice,
-        deviationLevel: item.deviationLevel,
-        isScreeningItem: item.isScreeningItem,
-      }));
-
-      const strategyOverrides = Object.entries(overrides).map(([row, o]) => ({
-        row: Number(row),
-        ...o,
-      }));
-
       const res = await fetch('/api/step4', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ compareItems, strategyOverrides }),
+        body: JSON.stringify({ compareItems: step3Data }),
       });
       const data = await res.json();
-      if (!data.success) throw new Error(data.error || '策略计算失败');
-      updateState({ step4Data: data.strategyItems });
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (data.success) {
+        updateState({ step4Data: data.items });
+      } else {
+        setError(data.error || '策略分配失败');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '请求失败');
     } finally {
       setLoading(false);
     }
-  };
+  }, [step3Data, updateState]);
 
-  const items = state.step4Data || [];
-  const filtered = filterStrategy === '全部' ? items : items.filter((i) => i.strategyLevel === filterStrategy);
+  const handleExport = useCallback(async () => {
+    if (!step4Data) return;
+    const rows = step4Data.map((it) => [
+      it.category, it.code, it.name, it.unit,
+      it.quantity, it.maxUnitPrice, it.ourUnitPrice,
+      it.deviationLevel, it.quantityForecast, it.optimization,
+      it.totalScore, it.strategyLevel,
+      `${it.coefficientRange[0]}~${it.coefficientRange[1]}`,
+      it.suggestion,
+    ]);
+    const result = await exportToExcel(
+      [{ name: '报价策略', headers: ['分部', '编码', '名称', '单位', '工程量', '限价单价', '我方单价', '偏差等级', '工程量预测', '优化评估', '总分', '策略等级', '系数范围', '建议'], rows }],
+      '不平衡报价策略.xlsx',
+    );
+    downloadBase64File(result.base64, result.fileName);
+  }, [step4Data]);
 
-  const strategyLevels = ['极高', '高', '平均偏高', '平均', '平均偏低', '低', '极低'];
-
-  const updateOverride = (row: number, field: 'quantityForecast' | 'optimization', value: string) => {
-    setOverrides((prev) => ({
-      ...prev,
-      [row]: { ...(prev[row] || { quantityForecast: '基本一致/不确定', optimization: '不能优化' }), [field]: value },
-    }));
-  };
+  const strategyCounts = step4Data ? Object.entries(
+    step4Data.reduce<Record<string, number>>((acc, it) => {
+      acc[it.strategyLevel] = (acc[it.strategyLevel] || 0) + 1;
+      return acc;
+    }, {}),
+  ) : null;
 
   return (
-    <div className="h-full flex flex-col">
-      {/* 操作区 */}
-      <div className="flex items-center gap-4 p-4 border-b border-slate-200 bg-white flex-wrap">
-        <h2 className="text-sm font-semibold text-slate-800 whitespace-nowrap">步骤4：不平衡报价策略</h2>
-        <button
-          onClick={handleCalculate}
-          disabled={loading || !state.step3Data?.length}
-          className="px-3 py-1 text-xs bg-amber-500 text-white rounded hover:bg-amber-600 disabled:opacity-50"
-        >
-          {loading ? '计算中...' : '策略评分'}
-        </button>
-        {!state.step3Data?.length && (
-          <span className="text-xs text-rose-500">需先完成步骤3限价对比</span>
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-base font-semibold">步骤4：不平衡报价策略</h2>
+        {step4Data && (
+          <button onClick={handleExport} className="text-xs px-3 py-1.5 bg-primary text-primary-foreground rounded hover:bg-primary/90">
+            导出Excel
+          </button>
         )}
       </div>
 
-      {error && <div className="mx-4 mt-2 p-2 bg-red-50 text-red-700 text-xs rounded">{error}</div>}
-
-      {/* 策略分布 */}
-      {items.length > 0 && (
-        <div className="mx-4 mt-2 flex gap-2 flex-wrap">
-          <button
-            onClick={() => setFilterStrategy('全部')}
-            className={`text-xs px-2.5 py-1 rounded ${filterStrategy === '全部' ? 'bg-amber-500 text-white' : 'bg-slate-100 text-slate-600'}`}
-          >
-            全部 ({items.length})
-          </button>
-          {strategyLevels.map((level) => {
-            const count = items.filter((i) => i.strategyLevel === level).length;
-            if (count === 0) return null;
-            return (
-              <button
-                key={level}
-                onClick={() => setFilterStrategy(level)}
-                className={`text-xs px-2.5 py-1 rounded ${filterStrategy === level ? 'bg-amber-500 text-white' : STRATEGY_COLORS[level]}`}
-              >
-                {level} ({count})
-              </button>
-            );
-          })}
+      {!step3Data && (
+        <div className="text-xs text-muted-foreground p-3 bg-muted/30 rounded">
+          提示：请先在步骤3中执行限价对比，或直接点击下方按钮使用已有数据
         </div>
       )}
 
-      {/* 数据表格 */}
-      <div className="flex-1 overflow-auto p-4">
-        {filtered.length > 0 && (
-          <table className="w-full text-xs border-collapse">
+      <button
+        onClick={handleStrategy}
+        disabled={loading || !step3Data}
+        className="w-full py-2 bg-primary text-primary-foreground rounded text-sm font-medium hover:bg-primary/90 disabled:opacity-50"
+      >
+        {loading ? '策略计算中...' : '分配报价策略'}
+      </button>
+
+      {error && <div className="text-xs text-destructive p-2 bg-destructive/10 rounded">{error}</div>}
+
+      {/* 策略分布 */}
+      {strategyCounts && (
+        <div className="flex flex-wrap gap-2">
+          {strategyCounts.map(([level, count]) => (
+            <span key={level} className={`text-xs px-2 py-1 rounded ${STRATEGY_COLORS[level] || ''}`}>
+              {level}: {count}项
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* 策略结果表格 */}
+      {step4Data && (
+        <div className="overflow-x-auto border border-border rounded">
+          <table className="w-full text-xs">
             <thead>
-              <tr className="bg-slate-100">
-                <th className="border border-slate-300 px-2 py-1">分类</th>
-                <th className="border border-slate-300 px-2 py-1">项目名称</th>
-                <th className="border border-slate-300 px-2 py-1 text-right">我方单价</th>
-                <th className="border border-slate-300 px-2 py-1 text-right">限价单价</th>
-                <th className="border border-slate-300 px-2 py-1">偏差等级</th>
-                <th className="border border-slate-300 px-2 py-1">工程量预测</th>
-                <th className="border border-slate-300 px-2 py-1">优化空间</th>
-                <th className="border border-slate-300 px-2 py-1 text-right">总分</th>
-                <th className="border border-slate-300 px-2 py-1">策略等级</th>
-                <th className="border border-slate-300 px-2 py-1">系数范围</th>
-                <th className="border border-slate-300 px-2 py-1">建议</th>
+              <tr className="bg-muted/50">
+                <th className="px-2 py-1.5 text-left">分部</th>
+                <th className="px-2 py-1.5 text-left">编码</th>
+                <th className="px-2 py-1.5 text-left">名称</th>
+                <th className="px-2 py-1.5 text-right">工程量</th>
+                <th className="px-2 py-1.5 text-right">偏差</th>
+                <th className="px-2 py-1.5 text-center">评分</th>
+                <th className="px-2 py-1.5 text-center">策略</th>
+                <th className="px-2 py-1.5 text-center">系数范围</th>
               </tr>
             </thead>
             <tbody>
-              {filtered.map((item, i) => (
-                <tr key={i} className={i % 2 === 0 ? 'bg-white' : 'bg-slate-50'}>
-                  <td className="border border-slate-300 px-2 py-1">{item.category}</td>
-                  <td className="border border-slate-300 px-2 py-1">{item.name}</td>
-                  <td className="border border-slate-300 px-2 py-1 text-right font-mono">{item.ourUnitPrice.toFixed(2)}</td>
-                  <td className="border border-slate-300 px-2 py-1 text-right font-mono text-amber-700">{item.maxUnitPrice.toFixed(2)}</td>
-                  <td className="border border-slate-300 px-2 py-1 text-xs">{item.deviationLevel}</td>
-                  <td className="border border-slate-300 px-2 py-1">
-                    <select
-                      value={overrides[item.row]?.quantityForecast || item.quantityForecast}
-                      onChange={(e) => updateOverride(item.row, 'quantityForecast', e.target.value)}
-                      className="text-xs border rounded px-1 py-0.5 w-24"
-                    >
-                      {FORECAST_OPTIONS.map((o) => <option key={o} value={o}>{o}</option>)}
-                    </select>
-                  </td>
-                  <td className="border border-slate-300 px-2 py-1">
-                    <select
-                      value={overrides[item.row]?.optimization || item.optimization}
-                      onChange={(e) => updateOverride(item.row, 'optimization', e.target.value)}
-                      className="text-xs border rounded px-1 py-0.5 w-20"
-                    >
-                      {OPTIMIZATION_OPTIONS.map((o) => <option key={o} value={o}>{o}</option>)}
-                    </select>
-                  </td>
-                  <td className={`border border-slate-300 px-2 py-1 text-right font-mono font-semibold ${item.totalScore >= 4 ? 'text-rose-600' : item.totalScore <= -4 ? 'text-blue-600' : 'text-slate-700'}`}>
-                    {item.totalScore}
-                  </td>
-                  <td className="border border-slate-300 px-2 py-1">
-                    <span className={`text-xs px-1.5 py-0.5 rounded ${STRATEGY_COLORS[item.strategyLevel] || ''}`}>
-                      {item.strategyLevel}
+              {step4Data.map((it, i) => (
+                <tr key={i} className="border-t border-border">
+                  <td className="px-2 py-1">{it.category}</td>
+                  <td className="px-2 py-1 font-mono">{it.code}</td>
+                  <td className="px-2 py-1">{it.name}</td>
+                  <td className="px-2 py-1 text-right font-mono">{fmt(it.quantity)}</td>
+                  <td className="px-2 py-1 text-center text-muted-foreground">{it.deviationLevel}</td>
+                  <td className="px-2 py-1 text-center font-mono">{it.totalScore}</td>
+                  <td className="px-2 py-1 text-center">
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] ${STRATEGY_COLORS[it.strategyLevel] || ''}`}>
+                      {it.strategyLevel}
                     </span>
                   </td>
-                  <td className="border border-slate-300 px-2 py-1 font-mono text-xs">
-                    {item.coefficientRange[0].toFixed(2)}~{item.coefficientRange[1].toFixed(2)}
+                  <td className="px-2 py-1 text-center font-mono text-[10px]">
+                    {it.coefficientRange[0]}~{it.coefficientRange[1]}
                   </td>
-                  <td className="border border-slate-300 px-2 py-1 text-xs text-slate-500 max-w-32">{item.suggestion}</td>
                 </tr>
               ))}
             </tbody>
           </table>
-        )}
-
-        {!items.length && !loading && (
-          <div className="flex items-center justify-center h-full text-slate-400 text-sm">
-            完成步骤3后，点击&quot;策略评分&quot;自动计算不平衡报价策略
-          </div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 }

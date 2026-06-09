@@ -4,6 +4,15 @@ import { createContext, useContext, useState, useCallback, type ReactNode } from
 
 /* ──────── 类型定义 ──────── */
 
+/** 文件库条目 */
+export interface FileEntry {
+  id: string;
+  name: string;
+  base64: string;
+  type: 'excel' | 'pdf';
+  uploadedAt: number;
+}
+
 /** 汇总行 */
 export interface SummaryRow {
   key: string;
@@ -120,6 +129,7 @@ export interface PriceChange {
   originalPrice: number;
   adjustedPrice: number;
   diff: number;
+  diffPercent?: number;
 }
 
 /** 步骤5结果 */
@@ -132,25 +142,30 @@ export interface Step5Data {
 /** 步骤6结果 */
 export interface Step6Data {
   level3: { adjustableResourceCount: number; priceChanges: PriceChange[]; baseTotal: number; iterationLog: Array<{ iteration: number; totalDiff: number; adjustedCount: number }>; method: string };
-  validation: { targetTotal: number; actualTotal: number; diff: number; pass: boolean; iterations: number; converged: boolean };
+  validation: { targetTotal: number; actualTotal: number; diff: number; pass: boolean; iterations: number; converged: boolean; bestScaleFactor?: number };
   finalSummary: SummaryRow[] | null;
+}
+
+/** 步骤1提取结果 */
+export interface Step1Data {
+  items: Array<{ category: string; items: Array<{ label: string; value: string; editable?: boolean }> }>;
 }
 
 /** 全局应用状态 */
 export interface AppState {
-  /** 已加载的Excel文件名 */
-  fileName: string;
-  /** Excel文件Base64（供后续步骤使用） */
-  fileBase64: string;
+  /** 文件库 */
+  fileLibrary: FileEntry[];
+  /** 各步骤选中的文件ID */
+  selectedFileIds: Record<number, string>;
 
-  step1Completed: boolean;
+  step1Data: Step1Data | null;
   step2Data: Step2Data | null;
   step3Data: PriceCompareItem[] | null;
   step4Data: StrategyItem[] | null;
   step5Data: Step5Data | null;
   step6Data: Step6Data | null;
-  step7Completed: boolean;
-  step8Completed: boolean;
+  step7FileBase64: string | null;
+  step7FileName: string | null;
 
   /** 最高投标限价合计（用户输入） */
   maxPriceTotal: number;
@@ -159,16 +174,18 @@ export interface AppState {
 }
 
 const initialState: AppState = {
-  fileName: '',
-  fileBase64: '',
-  step1Completed: false,
+  fileLibrary: [],
+  selectedFileIds: {},
+
+  step1Data: null,
   step2Data: null,
   step3Data: null,
   step4Data: null,
   step5Data: null,
   step6Data: null,
-  step7Completed: false,
-  step8Completed: false,
+  step7FileBase64: null,
+  step7FileName: null,
+
   maxPriceTotal: 0,
   targetDiscountRate: 0.05,
 };
@@ -180,6 +197,12 @@ interface AppContextValue {
   setState: React.Dispatch<React.SetStateAction<AppState>>;
   /** 便捷更新部分状态 */
   updateState: (partial: Partial<AppState>) => void;
+  /** 添加文件到文件库 */
+  addFile: (entry: Omit<FileEntry, 'id' | 'uploadedAt'>) => string;
+  /** 获取指定步骤选中的文件 */
+  getSelectedFile: (step: number) => FileEntry | undefined;
+  /** 选择文件给某步骤 */
+  selectFile: (step: number, fileId: string) => void;
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
@@ -190,8 +213,31 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setState((prev) => ({ ...prev, ...partial }));
   }, []);
 
+  const addFile = useCallback((entry: Omit<FileEntry, 'id' | 'uploadedAt'>) => {
+    const id = `file_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const newFile: FileEntry = { ...entry, id, uploadedAt: Date.now() };
+    setState((prev) => ({
+      ...prev,
+      fileLibrary: [...prev.fileLibrary, newFile],
+    }));
+    return id;
+  }, []);
+
+  const getSelectedFile = useCallback((step: number) => {
+    const fileId = state.selectedFileIds[step];
+    if (!fileId) return undefined;
+    return state.fileLibrary.find((f) => f.id === fileId);
+  }, [state.selectedFileIds, state.fileLibrary]);
+
+  const selectFile = useCallback((step: number, fileId: string) => {
+    setState((prev) => ({
+      ...prev,
+      selectedFileIds: { ...prev.selectedFileIds, [step]: fileId },
+    }));
+  }, []);
+
   return (
-    <AppContext.Provider value={{ state, setState, updateState }}>
+    <AppContext.Provider value={{ state, setState, updateState, addFile, getSelectedFile, selectFile }}>
       {children}
     </AppContext.Provider>
   );

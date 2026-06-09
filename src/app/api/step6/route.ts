@@ -17,14 +17,15 @@ function toNum(v: CellValue | undefined): number {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { table7FileBase64, fileBase64, balancedItems, tolerance = 10 } = body as {
+    const { table7FileBase64, fileBase64, balancedItems, tolerance = 10, filePath } = body as {
       table7FileBase64?: string;
       fileBase64?: string;
       balancedItems?: Array<{
         row: number; category: string; code: string; name: string;
         quantity: number; targetUnitPrice: number; targetTotalPrice: number;
       }>;
-      tolerance?: number; // 可接受的总价差额(元)，默认10元
+      tolerance?: number;
+      filePath?: string;
     };
 
     if (!balancedItems?.length) {
@@ -34,11 +35,15 @@ export async function POST(request: NextRequest) {
       }, { status: 400 });
     }
 
-    // 1. 读取表7（仅支持前端上传的base64）
+    // 1. 读取表7
     let fileBuffer: Buffer;
     const base64 = fileBase64 || table7FileBase64;
     if (base64) {
       fileBuffer = Buffer.from(base64, 'base64');
+    } else if (filePath) {
+      const fs = await import('fs');
+      const pathMod = await import('path');
+      fileBuffer = fs.readFileSync(pathMod.join(process.cwd(), filePath));
     } else {
       return NextResponse.json({ success: false, error: '请提供表7文件base64' }, { status: 400 });
     }
@@ -139,6 +144,7 @@ async function materialLevelPricing(
   const finalResSheet = finalWb.get('工料机汇总表');
   if (!finalResSheet) return { success: false, error: '未找到工料机汇总表' };
 
+  // ---- Phase 1: 单次调价（新算法） ----
   for (const res of adjustableResources) {
     const delta = priceDeltaByCode.get(res.code) || 0;
     if (delta === 0 || res.originalPrice <= 0) continue;
@@ -152,12 +158,64 @@ async function materialLevelPricing(
     res.adjustedPrice = adjustedPrice;
   }
 
-  const { workbook: finalWbResult } = calculateWorkbook(finalWb);
-  const finalTotal = calcCurrentTotal(finalWbResult);
+  // ---- Phase 2: 二分法微调统一缩放因子k ----
+  let currentWb = cloneWorkbook(originalWb);
+  const currentResSheet = currentWb.get('工料机汇总表')!;
+
+  let kLow = 0.5, kHigh = 2.0;
+  let bestK = 1.0;
+  let bestDiff = Infinity;
+  let bestWb = currentWb;
+  let iterations = 0;
+  const maxIter = 30;
+
+  for (let i = 0; i < maxIter; i++) {
+    iterations++;
+    const k = (kLow + kHigh) / 2;
+    const testWb = cloneWorkbook(originalWb);
+    const testResSheet = testWb.get('工料机汇总表')!;
+
+    for (const res of adjustableResources) {
+      if (!res.isAdjustable || res.originalPrice <= 0) continue;
+      const delta = priceDeltaByCode.get(res.code) || 0;
+      const basePrice = Math.max(0.01, round2(res.originalPrice + delta));
+      const scaledPrice = Math.max(0.01, round2(basePrice * k));
+      const cell = testResSheet.get(`${res.row},6`);
+      if (cell) cell.value = scaledPrice;
+    }
+
+    const { workbook: testResult } = calculateWorkbook(testWb);
+    const testTotal = calcCurrentTotal(testResult);
+    const testDiff = testTotal - targetTotal;
+
+    if (Math.abs(testDiff) < Math.abs(bestDiff)) {
+      bestDiff = testDiff;
+      bestK = k;
+      bestWb = testWb;
+    }
+
+    if (Math.abs(testDiff) <= tolerance) break;
+
+    if (testDiff < 0) {
+      kLow = k;
+    } else {
+      kHigh = k;
+    }
+  }
+
+  // 更新adjustedPrice
+  for (const res of adjustableResources) {
+    if (!res.isAdjustable || res.originalPrice <= 0) continue;
+    const delta = priceDeltaByCode.get(res.code) || 0;
+    const basePrice = Math.max(0.01, round2(res.originalPrice + delta));
+    res.adjustedPrice = Math.max(0.01, round2(basePrice * bestK));
+  }
+
+  const finalTotal = calcCurrentTotal(bestWb);
   const finalDiff = finalTotal - targetTotal;
 
   // 10. 提取调价前后对比
-  const priceChanges = extractPriceChanges(originalWb, finalWbResult, adjustableResources);
+  const priceChanges = extractPriceChanges(originalWb, bestWb, adjustableResources);
 
   // 11. 校验结果
   const converged = Math.abs(finalDiff) <= tolerance;
@@ -166,8 +224,9 @@ async function materialLevelPricing(
     actualTotal: round2(finalTotal),
     diff: round2(finalDiff),
     pass: converged,
-    iterations: 1,
+    iterations,
     converged,
+    bestScaleFactor: round2(bestK),
     formulaErrors: 0,
   };
 
@@ -182,10 +241,10 @@ async function materialLevelPricing(
       }],
       itemAdjustmentLog: itemAdjustmentLog.slice(0, 100),
       baseTotal: round2(baseTotal),
-      method: 'item-resource-allocation',
+      method: 'item-resource-allocation + binary-search-scale',
     },
     validation,
-    finalSummary: extractSummary(finalWbResult),
+    finalSummary: extractSummary(bestWb),
   };
 }
 

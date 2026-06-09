@@ -1,243 +1,211 @@
 'use client';
 
-import { useState, useRef } from 'react';
+import { useState, useCallback } from 'react';
 import { useAppState } from '@/lib/app-state';
+import { FileSelector } from '@/components/file-selector';
+import { downloadBase64File, fmt } from '@/lib/export-utils';
+import { exportToExcel } from '@/lib/export-utils';
 
-interface ExtractedItem {
-  category: string;
-  content: string;
-  requirement: string;
-  impact: string;
-}
-
-export default function Step1Panel() {
+export function Step1Panel() {
   const { state, updateState } = useAppState();
   const [loading, setLoading] = useState(false);
-  const [pdfLoading, setPdfLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [content, setContent] = useState('');
-  const [items, setItems] = useState<ExtractedItem[]>([]);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [error, setError] = useState('');
+  const [textInput, setTextInput] = useState('');
 
-  // PDF上传解析
-  const handlePdfUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  const step1Data = state.step1Data;
 
-    if (!file.name.toLowerCase().endsWith('.pdf')) {
-      setError('请上传PDF文件');
-      return;
-    }
+  const handleExtract = useCallback(async () => {
+    const selectedFile = state.fileLibrary.find(
+      (f) => f.id === state.selectedFileIds[1],
+    );
 
-    setPdfLoading(true);
-    setError(null);
-
-    try {
-      const arrayBuffer = await file.arrayBuffer();
-      const base64 = Buffer.from(arrayBuffer).toString('base64');
-
-      const res = await fetch('/api/step1/parse-pdf', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fileBase64: base64 }),
-      });
-
-      const data = await res.json() as { success: boolean; text?: string; error?: string; pages?: number };
-      if (!data.success) throw new Error(data.error || 'PDF解析失败');
-
-      setContent(data.text || '');
-      setError(null);
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setPdfLoading(false);
-      if (fileInputRef.current) fileInputRef.current.value = '';
-    }
-  };
-
-  const handleExtract = async (streaming: boolean = true) => {
-    if (!content.trim()) {
-      setError('请输入招标文件内容或上传PDF文件');
+    if (!textInput && !selectedFile) {
+      setError('请上传招标文件或直接输入文本内容');
       return;
     }
 
     setLoading(true);
-    setError(null);
-    setItems([]);
+    setError('');
 
     try {
-      if (streaming) {
-        const res = await fetch('/api/step1/extract-stream', {
+      let content = textInput;
+
+      // 如果选择了PDF文件，先解析PDF
+      if (selectedFile?.type === 'pdf') {
+        const parseRes = await fetch('/api/step1/parse-pdf', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ content }),
+          body: JSON.stringify({ fileBase64: selectedFile.base64 }),
         });
-        const reader = res.body?.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-
-        while (reader) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-
-          const lines = buffer.split('\n');
-          buffer = lines.pop() || '';
-
-          for (const line of lines) {
-            if (!line.startsWith('data: ')) continue;
-            const data = line.slice(6).trim();
-            if (data === '[DONE]') continue;
-            try {
-              const parsed = JSON.parse(data) as { items?: ExtractedItem[] };
-              if (parsed.items) setItems(parsed.items);
-            } catch { /* skip */ }
-          }
+        const parseData = await parseRes.json();
+        if (!parseData.success) {
+          setError(parseData.error || 'PDF解析失败');
+          setLoading(false);
+          return;
         }
-      } else {
-        const res = await fetch('/api/step1/extract', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ content }),
-        });
-        const data = await res.json() as { success: boolean; items?: ExtractedItem[]; error?: string };
-        if (!data.success) throw new Error(data.error || '提取失败');
-        setItems(data.items || []);
+        content = parseData.text || '';
+        if (!content.trim()) {
+          setError('PDF解析结果为空，请直接输入文本内容');
+          setLoading(false);
+          return;
+        }
       }
 
-      updateState({ step1Completed: true });
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
+      // AI提取
+      const res = await fetch('/api/step1/extract-stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content }),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        setError(errData.error || `请求失败 (${res.status})`);
+        setLoading(false);
+        return;
+      }
+
+      const reader = res.body?.getReader();
+      if (!reader) {
+        setError('无法读取流式响应');
+        setLoading(false);
+        return;
+      }
+
+      let fullText = '';
+      const decoder = new TextDecoder();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value, { stream: true });
+        // SSE format: data: {...}
+        for (const line of chunk.split('\n')) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6));
+              if (data.content) {
+                fullText += data.content;
+              }
+            } catch {
+              // skip non-JSON lines
+            }
+          }
+        }
+      }
+
+      // 尝试解析JSON
+      try {
+        // 从返回文本中提取JSON
+        const jsonMatch = fullText.match(/\[[\s\S]*\]/);
+        if (jsonMatch) {
+          const items = JSON.parse(jsonMatch[0]);
+          const categories = [
+            '项目基本信息',
+            '投标保证金',
+            '投标有效期',
+            '报价要求',
+            '价格调整',
+            '支付条款',
+            '工期要求',
+            '其他商务条款',
+          ];
+          const structuredItems = categories.map((cat, idx) => {
+            const catItems = items.filter((it: Record<string, string>) => it.category === cat);
+            if (catItems.length === 0) return { category: cat, items: [{ label: '未提取到', value: '' }] };
+            return {
+              category: cat,
+              items: catItems.map((it: Record<string, string>) => ({
+                label: it.label || it.item || '',
+                value: it.value || it.content || '',
+              })),
+            };
+          });
+          updateState({ step1Data: { items: structuredItems } });
+        } else {
+          setError('AI返回格式无法解析，请重试');
+        }
+      } catch {
+        setError('AI返回结果解析失败，请重试');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '未知错误');
     } finally {
       setLoading(false);
     }
-  };
+  }, [textInput, state.fileLibrary, state.selectedFileIds, updateState]);
 
-  const handleItemChange = (index: number, field: keyof ExtractedItem, value: string) => {
-    setItems((prev) => {
-      const next = [...prev];
-      next[index] = { ...next[index], [field]: value };
-      return next;
-    });
-  };
-
-  // 分类列表
-  const categories = [...new Set(items.map((i) => i.category))];
+  const handleExport = useCallback(async () => {
+    if (!step1Data) return;
+    const sheets = step1Data.items.map((cat) => ({
+      name: cat.category.slice(0, 31),
+      headers: ['条款', '内容'],
+      rows: cat.items.map((it) => [it.label, it.value]),
+    }));
+    const result = await exportToExcel(sheets, '招标文件分析结果.xlsx');
+    downloadBase64File(result.base64, result.fileName);
+  }, [step1Data]);
 
   return (
-    <div className="h-full flex flex-col">
-      {/* 操作区 */}
-      <div className="flex items-center gap-4 p-4 border-b border-slate-200 bg-white">
-        <h2 className="text-sm font-semibold text-slate-800 whitespace-nowrap">步骤1：分析招标文件</h2>
-        <button
-          onClick={() => handleExtract(true)}
-          disabled={loading || !content.trim()}
-          className="px-3 py-1 text-xs bg-amber-500 text-white rounded hover:bg-amber-600 disabled:opacity-50"
-        >
-          {loading ? '提取中...' : 'AI提取(流式)'}
-        </button>
-        <button
-          onClick={() => handleExtract(false)}
-          disabled={loading || !content.trim()}
-          className="px-3 py-1 text-xs bg-slate-600 text-white rounded hover:bg-slate-700 disabled:opacity-50"
-        >
-          AI提取(非流式)
-        </button>
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-base font-semibold">步骤1：分析招标文件</h2>
+        {step1Data && (
+          <button onClick={handleExport} className="text-xs px-3 py-1.5 bg-primary text-primary-foreground rounded hover:bg-primary/90">
+            导出Excel
+          </button>
+        )}
       </div>
 
-      {/* 输入区：PDF上传 + 文本 */}
-      <div className="px-4 pt-3 space-y-3">
-        {/* PDF上传 */}
-        <div className="flex items-center gap-3">
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".pdf"
-            onChange={handlePdfUpload}
-            className="hidden"
-          />
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            disabled={pdfLoading}
-            className="px-3 py-1.5 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 flex items-center gap-1.5"
-          >
-            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-            </svg>
-            {pdfLoading ? '解析中...' : '上传PDF招标文件'}
-          </button>
-          <span className="text-xs text-slate-400">支持PDF文件，自动提取文本内容</span>
-        </div>
+      {/* PDF文件上传 */}
+      <div>
+        <label className="text-sm font-medium text-muted-foreground">上传招标文件(PDF)</label>
+        <FileSelector step={1} accept=".pdf,.txt" onFileSelected={() => setTextInput('')} />
+      </div>
 
-        {/* 文本区 */}
+      {/* 文本输入 */}
+      <div>
+        <label className="text-sm font-medium text-muted-foreground">或直接输入招标文件文本内容</label>
         <textarea
-          value={content}
-          onChange={(e) => setContent(e.target.value)}
-          placeholder="上传PDF后自动填入文本，也可直接粘贴招标文件商务条款内容..."
-          className="w-full h-32 p-3 text-sm border border-slate-300 rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-amber-400"
+          className="w-full mt-1 p-2 border border-border rounded text-sm bg-background text-foreground resize-y"
+          rows={6}
+          placeholder="将招标文件的商务条款文本粘贴到此处..."
+          value={textInput}
+          onChange={(e) => setTextInput(e.target.value)}
         />
       </div>
 
-      {error && <div className="mx-4 mt-2 p-2 bg-red-50 text-red-700 text-xs rounded">{error}</div>}
+      {/* 执行按钮 */}
+      <button
+        onClick={handleExtract}
+        disabled={loading}
+        className="w-full py-2 bg-primary text-primary-foreground rounded text-sm font-medium hover:bg-primary/90 disabled:opacity-50"
+      >
+        {loading ? 'AI提取中...' : 'AI提取商务条款'}
+      </button>
 
-      {/* 提取结果表格 */}
-      <div className="flex-1 overflow-auto px-4 pb-4 mt-2">
-        {categories.map((cat) => (
-          <div key={cat} className="mb-4">
-            <h3 className="text-xs font-semibold text-slate-700 mb-2 px-1">{cat}</h3>
-            <table className="w-full text-xs border-collapse">
-              <thead>
-                <tr className="bg-slate-100">
-                  <th className="border border-slate-300 px-2 py-1 w-16">分类</th>
-                  <th className="border border-slate-300 px-2 py-1">条款内容</th>
-                  <th className="border border-slate-300 px-2 py-1">要求</th>
-                  <th className="border border-slate-300 px-2 py-1">对报价影响</th>
-                </tr>
-              </thead>
-              <tbody>
-                {items
-                  .map((item, i) => ({ item, originalIndex: i }))
-                  .filter(({ item }) => item.category === cat)
-                  .map(({ item, originalIndex }) => (
-                    <tr key={originalIndex} className={originalIndex % 2 === 0 ? 'bg-white' : 'bg-slate-50'}>
-                      <td className="border border-slate-300 px-2 py-1 text-slate-500">{item.category}</td>
-                      <td className="border border-slate-300 px-2 py-1">
-                        <input
-                          type="text"
-                          value={item.content}
-                          onChange={(e) => handleItemChange(originalIndex, 'content', e.target.value)}
-                          className="w-full text-xs bg-transparent focus:outline-none focus:bg-amber-50 px-1"
-                        />
-                      </td>
-                      <td className="border border-slate-300 px-2 py-1">
-                        <input
-                          type="text"
-                          value={item.requirement}
-                          onChange={(e) => handleItemChange(originalIndex, 'requirement', e.target.value)}
-                          className="w-full text-xs bg-transparent focus:outline-none focus:bg-amber-50 px-1"
-                        />
-                      </td>
-                      <td className="border border-slate-300 px-2 py-1">
-                        <input
-                          type="text"
-                          value={item.impact}
-                          onChange={(e) => handleItemChange(originalIndex, 'impact', e.target.value)}
-                          className="w-full text-xs bg-transparent focus:outline-none focus:bg-amber-50 px-1"
-                        />
-                      </td>
+      {error && <div className="text-xs text-destructive p-2 bg-destructive/10 rounded">{error}</div>}
+
+      {/* 结果展示 */}
+      {step1Data && (
+        <div className="space-y-3">
+          <h3 className="text-sm font-semibold text-foreground">提取结果</h3>
+          {step1Data.items.map((cat, idx) => (
+            <div key={idx} className="border border-border rounded">
+              <div className="bg-muted/50 px-3 py-1.5 text-sm font-medium">{cat.category}</div>
+              <table className="w-full text-xs">
+                <tbody>
+                  {cat.items.map((item, i) => (
+                    <tr key={i} className="border-t border-border">
+                      <td className="px-3 py-1.5 text-muted-foreground w-32">{item.label}</td>
+                      <td className="px-3 py-1.5">{item.value}</td>
                     </tr>
                   ))}
-              </tbody>
-            </table>
-          </div>
-        ))}
-
-        {!items.length && !loading && (
-          <div className="flex items-center justify-center h-40 text-slate-400 text-sm">
-            上传PDF或粘贴招标文件内容后，点击&quot;AI提取&quot;自动分析商务条款
-          </div>
-        )}
-      </div>
+                </tbody>
+              </table>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

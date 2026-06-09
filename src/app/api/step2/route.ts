@@ -21,9 +21,15 @@ export async function POST(request: NextRequest) {
       arrayBuffer = new Uint8Array(buffer).buffer;
     } else {
       const body = await request.json();
-      const { fileBase64 } = body as { fileBase64?: string };
+      const { fileBase64, filePath } = body as { fileBase64?: string; filePath?: string };
       if (fileBase64) {
         const buffer = Buffer.from(fileBase64, 'base64');
+        arrayBuffer = new Uint8Array(buffer).buffer;
+      } else if (filePath) {
+        const fs = await import('fs');
+        const path = await import('path');
+        const fullPath = path.join(process.cwd(), filePath);
+        const buffer = fs.readFileSync(fullPath);
         arrayBuffer = new Uint8Array(buffer).buffer;
       } else {
         return NextResponse.json({ success: false, error: '请上传文件或提供fileBase64' }, { status: 400 });
