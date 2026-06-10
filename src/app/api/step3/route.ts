@@ -1,24 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { pathToFileURL } from 'url';
 import * as XLSX from 'xlsx';
-import * as path from 'path';
-import * as fs from 'fs/promises';
+import { PDFParse } from 'pdf-parse';
+import { getPath as getPdfWorkerPath } from 'pdf-parse/worker';
 import { readExcelToWorkbook } from '@/lib/formula-engine/excel-reader';
 import { calculateWorkbook } from '@/lib/formula-engine/engine';
+import { getAnalysisSheets, getMainRows } from '@/lib/bidding/excel-sheets';
+import type { CellValue } from '@/lib/formula-engine/types';
 
 export const runtime = 'nodejs';
-
-/** 动态导入pdf-parse，避免构建时问题 */
-async function parsePdfText(buffer: Buffer): Promise<string> {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const mod: any = await import('pdf-parse');
-    const fn = mod.default || mod;
-    const data = await fn(buffer);
-    return data.text || '';
-  } catch {
-    return '';
-  }
-}
 
 interface BidItemInput {
   row: number;
@@ -40,12 +30,32 @@ interface LimitItem {
   quantity: number;
   maxUnitPrice: number;
   maxTotalPrice: number;
-  source?: 'pdf' | 'excel' | 'summary';
+  source: 'pdf' | 'excel' | 'summary';
 }
 
-interface LimitPdfParseResult {
-  total: number;
-  items: LimitItem[];
+interface CompareItemResult {
+  row: number;
+  category: string;
+  code: string;
+  name: string;
+  unit: string;
+  quantity: number;
+  ourUnitPrice: number;
+  ourTotalPrice: number;
+  maxUnitPrice: number;
+  maxTotalPrice: number;
+  limitPriceSource: 'pdf' | 'excel' | 'summary' | 'none';
+  limitQuantity: number;
+  limitName: string;
+  quantityDiff: number;
+  nameMatched: boolean;
+  deviationRate: number;
+  deviationLevel: string;
+  isScreeningItem: boolean;
+  itemReviewPrice?: number;
+  screeningRank?: number;
+  screeningBasis?: string;
+  isAbnormalBidItem?: boolean;
 }
 
 function toNum(v: unknown): number {
@@ -56,6 +66,7 @@ function toNum(v: unknown): number {
     const n = Number(v.replace(/,/g, '').trim());
     return Number.isFinite(n) ? n : 0;
   }
+  if (v instanceof Error) return 0;
   return 0;
 }
 
@@ -74,228 +85,369 @@ function normalizePdfText(text: string): string {
     .replace(/\n{3,}/g, '\n\n');
 }
 
-/** 解析表3 Excel限价清单 */
-function parseLimitBillExcel(fileBase64: string): LimitItem[] {
-  const buffer = Buffer.from(fileBase64, 'base64');
-  const workbook = XLSX.read(buffer, { type: 'buffer' });
-  const items: LimitItem[] = [];
-
-  for (const sheetName of workbook.SheetNames) {
-    if (!sheetName.includes('分部分项') && !sheetName.includes('清单计价')) continue;
-    const ws = workbook.Sheets[sheetName];
-    if (!ws['!ref']) continue;
-    const range = XLSX.utils.decode_range(ws['!ref']);
-    const category = sheetName.includes('道路') ? '道路工程' : sheetName.includes('桥梁') ? '桥梁工程' : sheetName.includes('排水') ? '排水工程' : '';
-
-    for (let r = range.s.r; r <= range.e.r; r++) {
-      const codeCell = ws[XLSX.utils.encode_cell({ r, c: 0 })] || ws[XLSX.utils.encode_cell({ r, c: 1 })];
-      const nameCell = ws[XLSX.utils.encode_cell({ r, c: 2 })] || ws[XLSX.utils.encode_cell({ r, c: 3 })];
-      const qtyCell = ws[XLSX.utils.encode_cell({ r, c: 4 })] || ws[XLSX.utils.encode_cell({ r, c: 5 })];
-      const priceCell = ws[XLSX.utils.encode_cell({ r, c: 6 })] || ws[XLSX.utils.encode_cell({ r, c: 7 })];
-      const totalCell = ws[XLSX.utils.encode_cell({ r, c: 8 })] || ws[XLSX.utils.encode_cell({ r, c: 9 })];
-      if (!codeCell || !priceCell) continue;
-      const code = normalizeCode(String(codeCell.v || ''));
-      if (!/^\d{9,}/.test(code)) continue;
-      const maxUnitPrice = toNum(priceCell.v);
-      const maxTotalPrice = toNum(totalCell?.v);
-      if (maxUnitPrice <= 0) continue;
-      items.push({
-        row: r + 1,
-        category,
-        code,
-        name: String(nameCell?.v || '').trim(),
-        unit: '',
-        quantity: toNum(qtyCell?.v),
-        maxUnitPrice,
-        maxTotalPrice,
-        source: 'excel',
-      });
-    }
-  }
-  return items;
-}
-
-/** 解析最高投标限价PDF */
-async function parseLimitPdf(fileBase64: string): Promise<LimitPdfParseResult> {
-  const buffer = Buffer.from(fileBase64, 'base64');
-  const text = normalizePdfText(await parsePdfText(buffer));
-  const items: LimitItem[] = [];
-
-  // 提取合计金额
-  let total = 0;
-  const totalPatterns = [
-    /最高投标限价[合计总]*[金额]*[：:\s]*([0-9,]+\.?\d*)/,
-    /限价合计[：:\s]*([0-9,]+\.?\d*)/,
-    /投标总价[：:\s]*([0-9,]+\.?\d*)/,
-    /合计[：:\s]*([0-9,]+\.?\d*)/,
-  ];
-  for (const p of totalPatterns) {
-    const m = text.match(p);
-    if (m) { total = toNum(m[1]); if (total > 0) break; }
-  }
-
-  // 提取分部分项限价明细
-  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
-  let currentCategory = '';
-  for (const line of lines) {
-    if (line.includes('道路工程')) currentCategory = '道路工程';
-    else if (line.includes('桥梁工程')) currentCategory = '桥梁工程';
-    else if (line.includes('排水工程')) currentCategory = '排水工程';
-
-    const codeMatch = line.match(/(\d{9,})\s+(.+?)\s+([\d,]+\.?\d*)\s+([\d,]+\.?\d*)/);
-    if (codeMatch) {
-      items.push({
-        row: items.length + 1,
-        category: currentCategory,
-        code: normalizeCode(codeMatch[1]),
-        name: codeMatch[2].trim(),
-        unit: '',
-        quantity: toNum(codeMatch[3]),
-        maxUnitPrice: toNum(codeMatch[4]),
-        maxTotalPrice: toNum(codeMatch[3]) * toNum(codeMatch[4]),
-        source: 'pdf',
-      });
-    }
-  }
-
-  return { total, items };
+function extractCategory(sheetName: string): string {
+  const match = sheetName.match(/【(.+)】/);
+  return match?.[1]?.trim() || sheetName;
 }
 
 function getDeviationLevel(rate: number): string {
-  const abs = Math.abs(rate);
-  if (abs >= 0.20) return rate > 0 ? '明显偏高' : '明显偏低';
-  if (abs >= 0.10) return rate > 0 ? '偏高' : '偏低';
-  return '基本接近';
+  if (rate >= 0.20) return '控制价明显偏高';
+  if (rate >= 0.10) return '控制价偏高';
+  if (rate >= -0.10) return '基本接近';
+  if (rate >= -0.20) return '控制价偏低';
+  return '控制价明显偏低/疑似已压价';
+}
+
+async function parseBidItemsFromPricingExcel(fileBase64: string): Promise<BidItemInput[]> {
+  const buffer = Buffer.from(fileBase64, 'base64');
+  const workbook = await readExcelToWorkbook(new Uint8Array(buffer).buffer);
+  const { workbook: calcWb } = calculateWorkbook(workbook);
+  const items: BidItemInput[] = [];
+
+  for (const cat of getAnalysisSheets(calcWb)) {
+    const sheet = cat.data;
+    for (const row of getMainRows(sheet)) {
+      const code = normalizeCode(String(sheet.get(`${row},2`)?.value ?? ''));
+      const name = String(sheet.get(`${row},3`)?.value ?? '').trim();
+      const quantity = toNum(sheet.get(`${row},5`)?.value);
+      const unitPrice = toNum(sheet.get(`${row},6`)?.value);
+      const totalPrice = toNum(sheet.get(`${row},7`)?.value);
+      if (!code || !name) continue;
+      items.push({
+        row,
+        category: cat.category,
+        code,
+        name,
+        unit: String(sheet.get(`${row},4`)?.value ?? '').trim(),
+        quantity,
+        unitPrice,
+        totalPrice,
+      });
+    }
+  }
+
+  return items;
+}
+
+function parseLimitBillExcel(fileBase64: string): LimitItem[] {
+  const buffer = Buffer.from(fileBase64, 'base64');
+  const workbook = XLSX.read(buffer, { type: 'buffer', cellFormula: true, cellDates: false });
+  const items: LimitItem[] = [];
+
+  for (const sheetName of workbook.SheetNames) {
+    if (!/分部分项工程.*清单计价表/.test(sheetName)) continue;
+
+    const sheet = workbook.Sheets[sheetName];
+    const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: null, raw: false });
+    const category = extractCategory(sheetName);
+
+    rows.forEach((row, index) => {
+      const serial = toNum(row[0]);
+      const code = normalizeCode(String(row[1] ?? ''));
+      const name = String(row[2] ?? '').trim();
+      const unit = String(row[5] ?? '').trim();
+      const quantity = toNum(row[6]);
+      const maxUnitPrice = toNum(row[7]);
+      const maxTotalPrice = toNum(row[8]);
+
+      if (serial > 0 && code && name && quantity > 0 && (maxUnitPrice > 0 || maxTotalPrice > 0)) {
+        items.push({
+          row: index + 1,
+          category,
+          code,
+          name,
+          unit,
+          quantity,
+          maxUnitPrice: maxUnitPrice > 0 ? maxUnitPrice : maxTotalPrice / quantity,
+          maxTotalPrice: maxTotalPrice > 0 ? maxTotalPrice : maxUnitPrice * quantity,
+          source: 'excel',
+        });
+      }
+    });
+  }
+
+  return items;
+}
+
+function extractLimitTotalFromText(text: string): number {
+  const summaryIndex = text.indexOf('汇总表');
+  const searchText = summaryIndex >= 0 ? text.slice(summaryIndex, summaryIndex + 2500) : text;
+  const patterns = [
+    /合计\s*=\s*1\s*\+\s*2\s*\+\s*3\s*\+\s*4\s*([0-9][0-9,]*(?:\.[0-9]+)?)/,
+    /合\s*计\s*([0-9][0-9,]*(?:\.[0-9]+)?)/,
+    /最高投标限价[\s\S]{0,300}?([0-9][0-9,]*(?:\.[0-9]+)?)/,
+  ];
+
+  for (const pattern of patterns) {
+    const match = searchText.match(pattern) || text.match(pattern);
+    const value = toNum(match?.[1]);
+    if (value > 10000) return value;
+  }
+
+  return 0;
+}
+
+function nearlyEqual(a: number, b: number, toleranceRate = 0.01): boolean {
+  if (a === 0 && b === 0) return true;
+  const tolerance = Math.max(0.05, Math.abs(b) * toleranceRate);
+  return Math.abs(a - b) <= tolerance;
+}
+
+function parsePdfBlockByMath(block: string, quantityHint = 0): { quantity: number; maxUnitPrice: number; maxTotalPrice: number } | null {
+  const numbers = Array.from(block.matchAll(/[0-9][0-9,]*(?:\.[0-9]+)?/g)).map((match) => toNum(match[0]));
+
+  for (let i = 0; i <= numbers.length - 3; i++) {
+    const quantity = numbers[i];
+    const maxUnitPrice = numbers[i + 1];
+    const maxTotalPrice = numbers[i + 2];
+    if (quantity <= 0 || maxUnitPrice <= 0 || maxTotalPrice <= 0) continue;
+    if (quantityHint > 0 && !nearlyEqual(quantity, quantityHint, 0.005)) continue;
+    if (nearlyEqual(quantity * maxUnitPrice, maxTotalPrice, 0.02)) {
+      return { quantity, maxUnitPrice, maxTotalPrice };
+    }
+  }
+
+  return null;
+}
+
+function parseLimitPdfItemsWithHints(text: string, hints: LimitItem[]): LimitItem[] {
+  if (!hints.length) return [];
+
+  const normalizedText = normalizePdfText(text);
+  const sortedHints = hints
+    .map((hint) => ({ ...hint, code: normalizeCode(hint.code) }))
+    .filter((hint) => hint.code)
+    .sort((a, b) => normalizedText.indexOf(a.code) - normalizedText.indexOf(b.code));
+
+  const items: LimitItem[] = [];
+  for (const hint of sortedHints) {
+    const start = normalizedText.indexOf(hint.code);
+    if (start < 0) continue;
+
+    let end = normalizedText.length;
+    for (const next of sortedHints) {
+      if (next.code === hint.code) continue;
+      const nextIndex = normalizedText.indexOf(next.code, start + hint.code.length);
+      if (nextIndex > start && nextIndex < end) end = nextIndex;
+    }
+
+    const pageBreak = normalizedText.indexOf('本页小计', start);
+    if (pageBreak > start && pageBreak < end) end = pageBreak;
+
+    const block = normalizedText.slice(start, Math.min(end, start + 1800));
+    const parsed = parsePdfBlockByMath(block, hint.quantity);
+    if (!parsed) continue;
+
+    items.push({
+      ...hint,
+      quantity: parsed.quantity,
+      maxUnitPrice: parsed.maxUnitPrice,
+      maxTotalPrice: parsed.maxTotalPrice,
+      source: 'pdf',
+    });
+  }
+
+  return items;
+}
+
+function parseLimitPdfItems(text: string): LimitItem[] {
+  const lines = normalizePdfText(text).split('\n').map((line) => line.trim()).filter(Boolean);
+  const items: LimitItem[] = [];
+  let currentCategory = '';
+  let currentBlock: string[] = [];
+
+  const flush = () => {
+    if (currentBlock.length === 0) return;
+    const block = currentBlock.join(' ');
+    currentBlock = [];
+
+    const head = block.match(/^(\d+)\s+(\d{9,12})\s+(.+?)\s/);
+    if (!head) return;
+
+    const tail = block.match(/([^\s\d]+)\s+([0-9][0-9,]*(?:\.[0-9]+)?)\s+([0-9][0-9,]*(?:\.[0-9]+)?)\s+([0-9][0-9,]*(?:\.[0-9]+)?)(?:\s+[0-9][0-9,]*(?:\.[0-9]+)?)?\s*$/i);
+    if (!tail) return;
+
+    const mathParsed = parsePdfBlockByMath(block);
+    const quantity = mathParsed?.quantity ?? toNum(tail[2]);
+    const maxUnitPrice = mathParsed?.maxUnitPrice ?? toNum(tail[3]);
+    const maxTotalPrice = mathParsed?.maxTotalPrice ?? toNum(tail[4]);
+    if (quantity <= 0 || maxUnitPrice <= 0 || maxTotalPrice <= 0) return;
+
+    items.push({
+      row: toNum(head[1]),
+      category: currentCategory,
+      code: normalizeCode(head[2]),
+      name: head[3].trim(),
+      unit: tail[1],
+      quantity,
+      maxUnitPrice,
+      maxTotalPrice,
+      source: 'pdf',
+    });
+  };
+
+  for (const line of lines) {
+    const categoryMatch = line.match(/^工程名称：(.+)/);
+    if (categoryMatch) currentCategory = categoryMatch[1].trim();
+
+    if (/^\d+\s+\d{9,12}\s+/.test(line)) {
+      flush();
+      currentBlock = [line];
+      continue;
+    }
+
+    if (/^(本页小计|合\s*计|-- \d+ of \d+ --)/.test(line)) {
+      flush();
+      continue;
+    }
+
+    if (currentBlock.length > 0) currentBlock.push(line);
+  }
+
+  flush();
+  return items;
+}
+
+async function parseLimitPdf(fileBase64: string, hints: LimitItem[] = []): Promise<{ total: number; items: LimitItem[] }> {
+  const buffer = Buffer.from(fileBase64, 'base64');
+  PDFParse.setWorker(pathToFileURL(getPdfWorkerPath()).href);
+  const parser = new PDFParse({ data: new Uint8Array(buffer) });
+
+  try {
+    const result = await parser.getText();
+    const text = result.text;
+    const hintedItems = parseLimitPdfItemsWithHints(text, hints);
+    return {
+      total: extractLimitTotalFromText(text),
+      items: hintedItems.length > 0 ? hintedItems : parseLimitPdfItems(text),
+    };
+  } finally {
+    await parser.destroy();
+  }
+}
+
+function buildSummaryLimitItems(bidItems: BidItemInput[], maxPriceTotal: number): LimitItem[] {
+  const ourTotal = bidItems.reduce((sum, item) => sum + toNum(item.totalPrice), 0);
+  const ratio = ourTotal > 0 ? maxPriceTotal / ourTotal : 1;
+  return bidItems.map((item) => ({
+    row: item.row,
+    category: item.category,
+    code: normalizeCode(item.code),
+    name: item.name,
+    unit: item.unit || '',
+    quantity: toNum(item.quantity),
+    maxUnitPrice: toNum(item.unitPrice) * ratio,
+    maxTotalPrice: toNum(item.totalPrice) * ratio,
+    source: 'summary' as const,
+  }));
+}
+
+function getScreeningCount(totalItems: number): number {
+  return Math.max(1, Math.ceil(totalItems * 0.3));
+}
+
+function applyBidReviewScreening<T extends {
+  code: string;
+  maxTotalPrice: number;
+  maxUnitPrice: number;
+  quantity: number;
+  ourUnitPrice: number;
+  isScreeningItem: boolean;
+}>(items: T[]): T[] {
+  const sorted = [...items]
+    .map((item, index) => ({
+      item,
+      index,
+      itemReviewPrice: item.maxTotalPrice > 0 ? item.maxTotalPrice : item.maxUnitPrice * item.quantity,
+    }))
+    .sort((a, b) => b.itemReviewPrice - a.itemReviewPrice);
+  const screeningCount = getScreeningCount(items.length);
+  const screeningIndexByCode = new Map(sorted.slice(0, screeningCount).map((entry, index) => [normalizeCode(entry.item.code), index + 1]));
+
+  return items.map((item) => {
+    const itemReviewPrice = item.maxTotalPrice > 0 ? item.maxTotalPrice : item.maxUnitPrice * item.quantity;
+    const screeningRank = screeningIndexByCode.get(normalizeCode(item.code));
+    const averageUnitPrice = item.maxUnitPrice;
+    const relativeDeviation = averageUnitPrice > 0 ? Math.abs(item.ourUnitPrice - averageUnitPrice) / averageUnitPrice : 0;
+    return {
+      ...item,
+      itemReviewPrice,
+      screeningRank,
+      screeningBasis: screeningRank
+        ? `按评标规则B项：子目评审价排序前30%（第${screeningRank}/${items.length}项）`
+        : '未进入子目评审价排序前30%',
+      isAbnormalBidItem: Boolean(screeningRank && relativeDeviation > 0.3),
+      isScreeningItem: Boolean(screeningRank),
+    };
+  });
 }
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { bidItems, limitBillFileBase64, limitPdfBase64, maxPriceTotal: inputMaxPriceTotal, table7FileBase64, filePath } = body as {
+    const {
+      bidItems: inputBidItems,
+      table7FileBase64,
+      limitBillFileBase64,
+      limitPdfBase64,
+      maxPriceTotal: inputMaxPriceTotal,
+    } = body as {
       bidItems?: BidItemInput[];
+      table7FileBase64?: string;
       limitBillFileBase64?: string;
       limitPdfBase64?: string;
       maxPriceTotal?: number;
-      table7FileBase64?: string;
-      filePath?: string;
     };
 
-    if (!bidItems?.length) {
-      return NextResponse.json({ success: false, error: '请先完成步骤2清单组价，生成我方清单数据' }, { status: 400 });
+    const bidItems = inputBidItems?.length
+      ? inputBidItems
+      : table7FileBase64
+        ? await parseBidItemsFromPricingExcel(table7FileBase64)
+        : [];
+
+    if (!bidItems.length) {
+      return NextResponse.json({ success: false, error: '请提供我方清单数据：先完成步骤2，或在步骤3上传清单组价表' }, { status: 400 });
     }
 
-    let limitItems: LimitItem[] = [];
     let maxPriceTotal = inputMaxPriceTotal || 0;
-    let limitPriceSource = 'none';
-
-    // Mode 1: Upload limit bill Excel + limit PDF (full-featured)
-    if (limitBillFileBase64) {
-      limitItems = parseLimitBillExcel(limitBillFileBase64);
-      if (limitItems.length === 0) {
-        return NextResponse.json({ success: false, error: '表3中未识别到限价清单，请确认工作表格式' }, { status: 400 });
-      }
-      limitPriceSource = 'excel';
-
-      if (limitPdfBase64) {
-        const limitPdf = await parseLimitPdf(limitPdfBase64);
-        if (limitPdf.total > 0) maxPriceTotal = limitPdf.total;
-        for (const item of limitPdf.items) {
-          limitItems.push(item);
-        }
-        limitPriceSource = 'excel+pdf';
-      }
-    }
-    // Mode 2: Fallback - use table7 file + maxPriceTotal (simpler workflow)
-    else if (table7FileBase64 || filePath) {
-      let arrayBuffer: ArrayBuffer;
-      if (filePath) {
-        const absPath = path.isAbsolute(filePath) ? filePath : path.join(process.cwd(), filePath);
-        arrayBuffer = new Uint8Array(await fs.readFile(absPath)).buffer;
-      } else {
-        arrayBuffer = Uint8Array.from(atob(table7FileBase64!), (c) => c.charCodeAt(0)).buffer;
-      }
-
-      const workbook = await readExcelToWorkbook(arrayBuffer);
-      const { workbook: calcWb } = calculateWorkbook(workbook);
-      const summarySheet = calcWb.get('汇总表');
-      if (summarySheet) {
-        const getCellVal = (key: string) => {
-          const cell = summarySheet.get(key);
-          return cell?.value != null ? toNum(cell.value) : 0;
-        };
-        if (maxPriceTotal <= 0) {
-          maxPriceTotal = getCellVal('4,3') + getCellVal('5,3') + getCellVal('6,3');
-        }
-        // Build limit items from summary sheet category totals
-        const categories = [
-          { category: '道路工程', c4Row: 4 },
-          { category: '桥梁工程', c4Row: 5 },
-          { category: '排水工程', c4Row: 6 },
-        ];
-        for (const cat of categories) {
-          const catMaxTotal = getCellVal(`${cat.c4Row},3`);
-          if (catMaxTotal > 0) {
-            const catOurTotal = bidItems
-              .filter((item) => item.category === cat.category)
-              .reduce((sum, item) => sum + toNum(item.totalPrice), 0);
-            const ratio = catOurTotal > 0 ? catMaxTotal / catOurTotal : 1;
-            for (const item of bidItems.filter((i) => i.category === cat.category)) {
-              limitItems.push({
-                row: item.row,
-                category: cat.category,
-                code: normalizeCode(item.code),
-                name: item.name,
-                unit: item.unit || '',
-                quantity: toNum(item.quantity),
-                maxUnitPrice: toNum(item.unitPrice) * ratio,
-                maxTotalPrice: toNum(item.totalPrice) * ratio,
-                source: 'summary',
-              });
-            }
-          }
-        }
-      }
-      limitPriceSource = 'summary';
-    }
-    else if (maxPriceTotal > 0) {
-      // Mode 3: Only maxPriceTotal provided, no file - use uniform ratio
-      const ourTotal = bidItems.reduce((sum, item) => sum + toNum(item.totalPrice), 0);
-      const ratio = ourTotal > 0 ? maxPriceTotal / ourTotal : 1;
-      for (const item of bidItems) {
-        limitItems.push({
-          row: item.row,
-          category: item.category,
-          code: normalizeCode(item.code),
-          name: item.name,
-          unit: item.unit || '',
-          quantity: toNum(item.quantity),
-          maxUnitPrice: toNum(item.unitPrice) * ratio,
-          maxTotalPrice: toNum(item.totalPrice) * ratio,
-          source: 'summary' as const,
-        });
-      }
-      limitPriceSource = 'manual_input';
-    }
-    else {
-      return NextResponse.json({ success: false, error: '请上传限价文件、报价文件或手动输入限价金额' }, { status: 400 });
-    }
-
-    if (maxPriceTotal <= 0) {
-      return NextResponse.json({ success: false, error: '无法确定最高限价合计，请上传限价PDF或手动输入限价金额' }, { status: 400 });
-    }
-
     const limitByCode = new Map<string, LimitItem>();
-    for (const item of limitItems) {
+    const limitBillItems = limitBillFileBase64 ? parseLimitBillExcel(limitBillFileBase64) : [];
+
+    for (const item of limitBillItems) {
       limitByCode.set(normalizeCode(item.code), item);
     }
 
-    const compareItems = [];
+    if (limitPdfBase64) {
+      const limitPdf = await parseLimitPdf(limitPdfBase64, limitBillItems);
+      if (limitPdf.total > 0) maxPriceTotal = limitPdf.total;
+      for (const item of limitPdf.items) {
+        // PDF contains the real control comprehensive unit price, so it wins over table 3.
+        limitByCode.set(normalizeCode(item.code), item);
+      }
+    }
+
+    if (limitByCode.size === 0) {
+      if (maxPriceTotal <= 0) {
+        return NextResponse.json({ success: false, error: '请上传限价PDF/表3，或手动输入最高投标限价合计' }, { status: 400 });
+      }
+      for (const item of buildSummaryLimitItems(bidItems, maxPriceTotal)) {
+        limitByCode.set(normalizeCode(item.code), item);
+      }
+    }
+
+    if (maxPriceTotal <= 0) {
+      maxPriceTotal = Array.from(limitByCode.values()).reduce((sum, item) => sum + toNum(item.maxTotalPrice), 0);
+    }
+
+    const compareItems: CompareItemResult[] = [];
     const unmatchedOurItems: string[] = [];
     for (const our of bidItems) {
       const limit = limitByCode.get(normalizeCode(our.code));
+      const ourUnitPrice = toNum(our.unitPrice);
+      const ourTotalPrice = toNum(our.totalPrice);
+
       if (!limit) {
         unmatchedOurItems.push(`${our.category} ${our.code} ${our.name}`);
-        const ourUnitPrice = toNum(our.unitPrice);
         compareItems.push({
           row: our.row,
           category: our.category,
@@ -304,9 +456,9 @@ export async function POST(request: NextRequest) {
           unit: our.unit || '',
           quantity: toNum(our.quantity),
           ourUnitPrice,
-          ourTotalPrice: toNum(our.totalPrice),
+          ourTotalPrice,
           maxUnitPrice: ourUnitPrice,
-          maxTotalPrice: toNum(our.totalPrice),
+          maxTotalPrice: ourTotalPrice,
           limitPriceSource: 'none',
           limitQuantity: toNum(our.quantity),
           limitName: our.name,
@@ -319,12 +471,7 @@ export async function POST(request: NextRequest) {
         continue;
       }
 
-      const ourUnitPrice = toNum(our.unitPrice);
-      const ourTotalPrice = toNum(our.totalPrice);
-      const maxUnitPrice = limit.maxUnitPrice;
-      const maxTotalPrice = limit.maxTotalPrice;
-      const deviationRate = ourUnitPrice > 0 ? (maxUnitPrice - ourUnitPrice) / ourUnitPrice : 0;
-
+      const deviationRate = ourUnitPrice > 0 ? (limit.maxUnitPrice - ourUnitPrice) / ourUnitPrice : 0;
       compareItems.push({
         row: our.row,
         category: our.category || limit.category,
@@ -334,9 +481,9 @@ export async function POST(request: NextRequest) {
         quantity: toNum(our.quantity),
         ourUnitPrice,
         ourTotalPrice,
-        maxUnitPrice,
-        maxTotalPrice,
-        limitPriceSource: limit.source || limitPriceSource,
+        maxUnitPrice: limit.maxUnitPrice,
+        maxTotalPrice: limit.maxTotalPrice,
+        limitPriceSource: limit.source,
         limitQuantity: limit.quantity,
         limitName: limit.name,
         quantityDiff: toNum(our.quantity) - limit.quantity,
@@ -348,29 +495,28 @@ export async function POST(request: NextRequest) {
     }
 
     const ourCodes = new Set(bidItems.map((item) => normalizeCode(item.code)));
-    const unmatchedLimitItems = limitItems
+    const unmatchedLimitItems = Array.from(limitByCode.values())
       .filter((item) => !ourCodes.has(normalizeCode(item.code)))
       .map((item) => `${item.category} ${item.code} ${item.name}`);
 
-    const stats = {
-      totalItems: compareItems.length,
-      limitItems: limitItems.length,
-      limitPriceSource,
-      unmatchedOurCount: unmatchedOurItems.length,
-      unmatchedLimitCount: unmatchedLimitItems.length,
-      screeningItems: compareItems.filter((i) => i.isScreeningItem).length,
-      highDeviation: compareItems.filter((i) => Math.abs(i.deviationRate) >= 0.20).length,
-      mediumDeviation: compareItems.filter((i) => Math.abs(i.deviationRate) >= 0.10 && Math.abs(i.deviationRate) < 0.20).length,
-      lowDeviation: compareItems.filter((i) => Math.abs(i.deviationRate) < 0.10).length,
-      averageDeviation: compareItems.length > 0
-        ? compareItems.reduce((sum, i) => sum + i.deviationRate, 0) / compareItems.length
-        : 0,
-    };
+    const screenedCompareItems = applyBidReviewScreening(compareItems);
 
     return NextResponse.json({
       success: true,
-      compareItems,
-      stats,
+      compareItems: screenedCompareItems,
+      items: screenedCompareItems,
+      stats: {
+        totalItems: screenedCompareItems.length,
+        limitItems: limitByCode.size,
+        pdfItems: screenedCompareItems.filter((item) => item.limitPriceSource === 'pdf').length,
+        excelItems: screenedCompareItems.filter((item) => item.limitPriceSource === 'excel').length,
+        summaryItems: screenedCompareItems.filter((item) => item.limitPriceSource === 'summary').length,
+        unmatchedOurCount: unmatchedOurItems.length,
+        unmatchedLimitCount: unmatchedLimitItems.length,
+        screeningRule: '评标规则B项：子目评审价排序前30%，相对偏差绝对值>30%为异常报价项',
+        screeningItems: screenedCompareItems.filter((item) => item.isScreeningItem).length,
+        abnormalBidItems: screenedCompareItems.filter((item) => item.isAbnormalBidItem).length,
+      },
       maxPriceTotal,
       unmatchedOurItems,
       unmatchedLimitItems,

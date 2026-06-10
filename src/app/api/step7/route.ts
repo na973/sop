@@ -28,14 +28,13 @@ function cloneWorkbook(wb: WorkbookData): WorkbookData {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { table7FileBase64, balancedItems, priceChanges, filePath } = body as {
+    const { table7FileBase64, balancedItems, priceChanges } = body as {
       table7FileBase64?: string;
       balancedItems?: Array<{
         row: number; category: string; code: string; name: string;
         quantity: number; targetUnitPrice: number; targetTotalPrice: number;
       }>;
       priceChanges?: Array<{ code: string; adjustedPrice: number }>;
-      filePath?: string;
     };
 
     if (!balancedItems?.length) {
@@ -49,11 +48,6 @@ export async function POST(request: NextRequest) {
     let arrayBuffer: ArrayBuffer;
     if (table7FileBase64) {
       const buffer = Buffer.from(table7FileBase64, 'base64');
-      arrayBuffer = new Uint8Array(buffer).buffer;
-    } else if (filePath) {
-      const fs = await import('fs');
-      const pathMod = await import('path');
-      const buffer = fs.readFileSync(pathMod.join(process.cwd(), filePath));
       arrayBuffer = new Uint8Array(buffer).buffer;
     } else {
       return NextResponse.json({ success: false, error: '请提供表7文件base64' }, { status: 400 });

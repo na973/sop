@@ -35,6 +35,10 @@ function AppContent() {
   };
 
   const fileCount = state.fileLibrary.length;
+  const wideSteps = new Set([3, 4, 5, 6, 7, 8]);
+  const contentClass = wideSteps.has(activeStep)
+    ? 'h-full w-full p-4'
+    : 'mx-auto w-full max-w-4xl p-6';
 
   return (
     <div className="h-screen flex bg-[#f8fafc]">
@@ -59,7 +63,7 @@ function AppContent() {
 
         {/* 工作面板 */}
         <div className="flex-1 overflow-auto">
-          <div className="max-w-4xl mx-auto p-6">
+          <div className={contentClass}>
             {renderPanel()}
           </div>
         </div>

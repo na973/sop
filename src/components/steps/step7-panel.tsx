@@ -6,7 +6,7 @@ import { FileSelector } from '@/components/file-selector';
 import { downloadBase64File } from '@/lib/export-utils';
 
 export function Step7Panel() {
-  const { state, getSelectedFile } = useAppState();
+  const { state, updateState, getSelectedFile } = useAppState();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState(false);
@@ -24,11 +24,15 @@ export function Step7Panel() {
       setError('请先在步骤5中执行清单调价配平');
       return;
     }
+    if (!step6Data?.level3?.priceChanges?.length) {
+      setError('请先在步骤6中执行材料调价配平，生成priceChanges');
+      return;
+    }
     setLoading(true);
     setError('');
     setSuccess(false);
     try {
-      const priceChanges = step6Data?.level3?.priceChanges || [];
+      const priceChanges = step6Data.level3.priceChanges;
       const res = await fetch('/api/step7', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -41,6 +45,7 @@ export function Step7Panel() {
       const data = await res.json();
       if (data.success && data.fileBase64) {
         downloadBase64File(data.fileBase64, data.fileName || '调价导出结果.xlsx');
+        updateState({ step7FileBase64: data.fileBase64, step7FileName: data.fileName || '调价导出结果.xlsx' });
         setSuccess(true);
       } else {
         setError(data.error || '导出失败');
@@ -50,7 +55,7 @@ export function Step7Panel() {
     } finally {
       setLoading(false);
     }
-  }, [selectedFile, step5Data]);
+  }, [selectedFile, step5Data, step6Data, updateState]);
 
   return (
     <div className="space-y-4">
@@ -76,7 +81,7 @@ export function Step7Panel() {
 
       <button
         onClick={handleExport}
-        disabled={loading || !selectedFile || !step5Data?.level2?.items}
+        disabled={loading || !selectedFile || !step5Data?.level2?.items || !step6Data?.level3?.priceChanges?.length}
         className="w-full py-2 bg-primary text-primary-foreground rounded text-sm font-medium hover:bg-primary/90 disabled:opacity-50"
       >
         {loading ? '生成Excel中...' : '导出调价后Excel文件'}
