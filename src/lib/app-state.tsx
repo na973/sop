@@ -9,7 +9,7 @@ export interface FileEntry {
   id: string;
   name: string;
   base64: string;
-  type: 'excel' | 'pdf';
+  type: 'excel' | 'pdf' | 'text';
   uploadedAt: number;
 }
 
@@ -75,7 +75,11 @@ export interface PriceCompareItem {
   ourTotalPrice: number;
   maxUnitPrice: number;
   maxTotalPrice: number;
-  limitPriceSource?: 'pdf' | 'excel';
+  limitPriceSource?: 'pdf' | 'excel' | 'summary' | 'none';
+  itemReviewPrice?: number;
+  screeningRank?: number;
+  screeningBasis?: string;
+  isAbnormalBidItem?: boolean;
   limitQuantity?: number;
   limitName?: string;
   quantityDiff?: number;
@@ -94,13 +98,22 @@ export interface StrategyItem {
   unit: string;
   quantity: number;
   maxUnitPrice: number;
+  maxTotalPrice?: number;
   ourUnitPrice: number;
   deviationLevel: string;
   isScreeningItem: boolean;
+  itemReviewPrice?: number;
+  screeningRank?: number;
+  screeningBasis?: string;
+  isAbnormalBidItem?: boolean;
   quantityForecast: string;
   optimization: string;
+  quantityScore?: number;
+  optimizationScore?: number;
+  deviationScore?: number;
   totalScore: number;
   strategyLevel: string;
+  discountRange?: [number, number];
   coefficientRange: [number, number];
   suggestion: string;
 }

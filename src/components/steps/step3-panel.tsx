@@ -21,15 +21,18 @@ export function Step3Panel() {
   const [localMaxPrice, setLocalMaxPrice] = useState(state.maxPriceTotal || 38000000);
 
   const step3Data = state.step3Data;
-  const selectedFile = getSelectedFile(3);
+  const pricingFile = getSelectedFile(3);
+  const limitBillFile = getSelectedFile(31);
+  const limitPdfFile = getSelectedFile(32);
 
   const handleCompare = useCallback(async () => {
-    if (!selectedFile) {
-      setError('请先上传或选择Excel文件');
+    const bidItems = state.step2Data?.bidItems;
+    if (!bidItems?.length && !pricingFile) {
+      setError('请先完成步骤2，或上传我方清单组价表');
       return;
     }
-    if (!localMaxPrice || localMaxPrice <= 0) {
-      setError('请输入最高投标限价合计');
+    if (!limitBillFile && !limitPdfFile && (!localMaxPrice || localMaxPrice <= 0)) {
+      setError('请上传最高限价PDF/表3，或手动输入最高投标限价合计');
       return;
     }
     setLoading(true);
@@ -39,15 +42,18 @@ export function Step3Panel() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          table7FileBase64: selectedFile.base64,
-          maxPriceTotal: localMaxPrice,
+          bidItems,
+          table7FileBase64: bidItems?.length ? undefined : pricingFile?.base64,
+          limitBillFileBase64: limitBillFile?.base64,
+          limitPdfBase64: limitPdfFile?.base64,
+          maxPriceTotal: localMaxPrice || undefined,
         }),
       });
       const data = await res.json();
       if (data.success) {
         updateState({
-          step3Data: data.items,
-          maxPriceTotal: localMaxPrice,
+          step3Data: data.compareItems || data.items,
+          maxPriceTotal: data.maxPriceTotal || localMaxPrice,
         });
       } else {
         setError(data.error || '对比失败');
@@ -57,7 +63,7 @@ export function Step3Panel() {
     } finally {
       setLoading(false);
     }
-  }, [selectedFile, localMaxPrice, updateState]);
+  }, [state.step2Data?.bidItems, pricingFile, limitBillFile, limitPdfFile, localMaxPrice, updateState]);
 
   const handleExport = useCallback(async () => {
     if (!step3Data) return;
@@ -66,10 +72,14 @@ export function Step3Panel() {
       it.quantity, it.ourUnitPrice, it.ourTotalPrice,
       it.maxUnitPrice, it.maxTotalPrice,
       it.deviationRate, it.deviationLevel,
+      it.itemReviewPrice ?? it.maxTotalPrice,
       it.isScreeningItem ? '是' : '否',
+      it.screeningRank ?? '',
+      it.isAbnormalBidItem ? '是' : '否',
+      it.screeningBasis ?? '',
     ]);
     const result = await exportToExcel(
-      [{ name: '限价对比', headers: ['分部', '编码', '名称', '单位', '工程量', '我方单价', '我方合价', '限价单价', '限价合价', '偏差率', '偏差等级', '甄别项'], rows }],
+      [{ name: '限价对比', headers: ['分部', '编码', '名称', '单位', '工程量', '我方单价', '我方合价', '限价单价', '限价合价', '偏差率', '偏差等级', '子目评审价', '甄别项', '甄别排名', '异常报价项', '甄别依据'], rows }],
       '限价对比结果.xlsx',
     );
     downloadBase64File(result.base64, result.fileName);
@@ -94,7 +104,22 @@ export function Step3Panel() {
       </div>
 
       {/* 文件选择 */}
-      <FileSelector step={3} accept=".xlsx,.xls" />
+      <div className="space-y-3">
+        {!state.step2Data?.bidItems?.length && (
+          <div>
+            <label className="text-sm font-medium text-muted-foreground">我方清单组价表（表2/表7）</label>
+            <FileSelector step={3} accept=".xlsx,.xls" />
+          </div>
+        )}
+        <div>
+          <label className="text-sm font-medium text-muted-foreground">表3 分部分项工程量清单计价表（可选，提供清单结构）</label>
+          <FileSelector step={31} accept=".xlsx,.xls" />
+        </div>
+        <div>
+          <label className="text-sm font-medium text-muted-foreground">最高投标限价 PDF（可选，优先读取真实综合单价）</label>
+          <FileSelector step={32} accept=".pdf" />
+        </div>
+      </div>
 
       {/* 限价输入 */}
       <div>
@@ -111,7 +136,7 @@ export function Step3Panel() {
       {/* 执行按钮 */}
       <button
         onClick={handleCompare}
-        disabled={loading || !selectedFile}
+        disabled={loading || (!state.step2Data?.bidItems?.length && !pricingFile)}
         className="w-full py-2 bg-primary text-primary-foreground rounded text-sm font-medium hover:bg-primary/90 disabled:opacity-50"
       >
         {loading ? '对比计算中...' : '执行限价对比'}
@@ -153,9 +178,12 @@ export function Step3Panel() {
                 <th className="px-2 py-1.5 text-right">工程量</th>
                 <th className="px-2 py-1.5 text-right">我方单价</th>
                 <th className="px-2 py-1.5 text-right">限价单价</th>
+                <th className="px-2 py-1.5 text-center">来源</th>
+                <th className="px-2 py-1.5 text-right">子目评审价</th>
                 <th className="px-2 py-1.5 text-right">偏差率</th>
                 <th className="px-2 py-1.5 text-center">偏差等级</th>
                 <th className="px-2 py-1.5 text-center">甄别</th>
+                <th className="px-2 py-1.5 text-center">异常</th>
               </tr>
             </thead>
             <tbody>
@@ -167,6 +195,8 @@ export function Step3Panel() {
                   <td className="px-2 py-1 text-right font-mono">{fmt(it.quantity)}</td>
                   <td className="px-2 py-1 text-right font-mono">{fmt(it.ourUnitPrice)}</td>
                   <td className="px-2 py-1 text-right font-mono">{fmt(it.maxUnitPrice)}</td>
+                  <td className="px-2 py-1 text-center">{it.limitPriceSource || '-'}</td>
+                  <td className="px-2 py-1 text-right font-mono">{fmt(it.itemReviewPrice ?? it.maxTotalPrice)}</td>
                   <td className="px-2 py-1 text-right font-mono">{(it.deviationRate * 100).toFixed(1)}%</td>
                   <td className="px-2 py-1 text-center">
                     <span className={`px-1.5 py-0.5 rounded text-[10px] ${DEVIATION_COLORS[it.deviationLevel] || ''}`}>
@@ -174,7 +204,10 @@ export function Step3Panel() {
                     </span>
                   </td>
                   <td className="px-2 py-1 text-center">
-                    {it.isScreeningItem && <span className="text-destructive font-bold">*</span>}
+                    {it.isScreeningItem ? `是${it.screeningRank ? `(${it.screeningRank})` : ''}` : '否'}
+                  </td>
+                  <td className="px-2 py-1 text-center">
+                    {it.isAbnormalBidItem ? <span className="text-destructive font-bold">是</span> : '否'}
                   </td>
                 </tr>
               ))}

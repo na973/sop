@@ -17,7 +17,7 @@ function toNum(v: CellValue | undefined): number {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { table7FileBase64, fileBase64, balancedItems, tolerance = 10, filePath } = body as {
+    const { table7FileBase64, fileBase64, balancedItems, tolerance = 10 } = body as {
       table7FileBase64?: string;
       fileBase64?: string;
       balancedItems?: Array<{
@@ -25,7 +25,6 @@ export async function POST(request: NextRequest) {
         quantity: number; targetUnitPrice: number; targetTotalPrice: number;
       }>;
       tolerance?: number;
-      filePath?: string;
     };
 
     if (!balancedItems?.length) {
@@ -40,10 +39,6 @@ export async function POST(request: NextRequest) {
     const base64 = fileBase64 || table7FileBase64;
     if (base64) {
       fileBuffer = Buffer.from(base64, 'base64');
-    } else if (filePath) {
-      const fs = await import('fs');
-      const pathMod = await import('path');
-      fileBuffer = fs.readFileSync(pathMod.join(process.cwd(), filePath));
     } else {
       return NextResponse.json({ success: false, error: '请提供表7文件base64' }, { status: 400 });
     }
@@ -159,7 +154,7 @@ async function materialLevelPricing(
   }
 
   // ---- Phase 2: 二分法微调统一缩放因子k ----
-  let currentWb = cloneWorkbook(originalWb);
+  const currentWb = cloneWorkbook(originalWb);
   const currentResSheet = currentWb.get('工料机汇总表')!;
 
   let kLow = 0.5, kHigh = 2.0;

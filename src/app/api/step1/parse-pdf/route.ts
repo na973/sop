@@ -1,4 +1,7 @@
 import { NextResponse } from 'next/server';
+import { pathToFileURL } from 'url';
+import { PDFParse } from 'pdf-parse';
+import { getPath as getPdfWorkerPath } from 'pdf-parse/worker';
 
 export const runtime = 'nodejs';
 
@@ -18,11 +21,15 @@ export async function POST(request: Request): Promise<NextResponse> {
     let pages = 0;
 
     try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const pdfParse = require('pdf-parse');
-      const data = await pdfParse(buffer);
-      text = data.text || '';
-      pages = data.numpages || 0;
+      PDFParse.setWorker(pathToFileURL(getPdfWorkerPath()).href);
+      const parser = new PDFParse({ data: new Uint8Array(buffer) });
+      try {
+        const data = await parser.getText();
+        text = data.text || '';
+        pages = data.total || 0;
+      } finally {
+        await parser.destroy();
+      }
     } catch {
       // pdf-parse failed, try LLM vision fallback
     }
