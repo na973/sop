@@ -1,7 +1,5 @@
 import { NextResponse } from 'next/server';
-import { pathToFileURL } from 'url';
-import { PDFParse } from 'pdf-parse';
-import { getPath as getPdfWorkerPath } from 'pdf-parse/worker';
+import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 
 export const runtime = 'nodejs';
 
@@ -15,26 +13,32 @@ export async function POST(request: Request): Promise<NextResponse> {
     }
 
     const buffer = Buffer.from(fileBase64, 'base64');
+    const data = new Uint8Array(buffer);
 
-    // Step 1: Try pdf-parse first (fast, works for text-based PDFs)
+    // 使用 pdfjs-dist 提取文本
     let text = '';
     let pages = 0;
 
     try {
-      PDFParse.setWorker(pathToFileURL(getPdfWorkerPath()).href);
-      const parser = new PDFParse({ data: new Uint8Array(buffer) });
-      try {
-        const data = await parser.getText();
-        text = data.text || '';
-        pages = data.total || 0;
-      } finally {
-        await parser.destroy();
+      const doc = await pdfjsLib.getDocument({ data, useSystemFonts: true }).promise;
+      pages = doc.numPages;
+      const pageTexts: string[] = [];
+
+      for (let i = 1; i <= doc.numPages; i++) {
+        const page = await doc.getPage(i);
+        const content = await page.getTextContent();
+        const pageText = content.items
+          .map((item: unknown) => (item as { str?: string }).str ?? '')
+          .join(' ');
+        pageTexts.push(`\n--- 第${i}页 ---\n${pageText}`);
       }
-    } catch {
-      // pdf-parse failed, try LLM vision fallback
+
+      text = pageTexts.join('\n');
+    } catch (parseErr) {
+      console.error('[PDF Parse] pdfjs-dist error:', parseErr instanceof Error ? parseErr.message : String(parseErr));
     }
 
-    // Step 2: If text is too short (likely scanned PDF), use LLM vision OCR
+    // 如果文本太短（可能是扫描PDF），尝试LLM视觉OCR回退
     const MIN_TEXT_LENGTH = 100;
     if (!text || text.trim().length < MIN_TEXT_LENGTH) {
       console.log('[PDF Parse] Text too short or empty, falling back to LLM vision OCR...');

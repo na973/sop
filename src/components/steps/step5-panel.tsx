@@ -63,10 +63,13 @@ export function Step5Panel() {
       it.category, it.code, it.name, '',
       it.quantity, it.unitPrice, it.totalPrice,
       it.maxUnitPrice, it.strategy,
-      it.priceRatio?.toFixed(4) ?? '', it.targetUnitPrice?.toFixed(2) ?? '', it.targetTotalPrice?.toFixed(2) ?? '',
+      it.priceRatio?.toFixed(4) ?? '',
+      (it.averageDiscountRate ?? 0).toFixed(2) + '%',
+      (it.weightRatio ?? 0).toFixed(4),
+      it.targetUnitPrice?.toFixed(2) ?? '', it.targetTotalPrice?.toFixed(2) ?? '',
     ]);
     const result = await exportToExcel(
-      [{ name: '清单配平', headers: ['分部', '编码', '名称', '单位', '工程量', '原综合单价', '原合价', '限价单价', '策略', '价格系数', '目标单价', '目标合价'], rows }],
+      [{ name: '清单配平', headers: ['分部', '编码', '名称', '单位', '工程量', '原综合单价', '原合价', '限价单价', '策略', '价格系数', '平均下浮率', '权重占比', '目标单价', '目标合价'], rows }],
       '清单调价配平结果.xlsx',
     );
     downloadBase64File(result.base64, result.fileName);
@@ -74,6 +77,7 @@ export function Step5Panel() {
 
   const level1 = step5Data?.level1;
   const level2 = step5Data?.level2;
+  const validation = step5Data?.validation;
 
   return (
     <div className="space-y-4">
@@ -112,6 +116,11 @@ export function Step5Panel() {
         </div>
       </div>
 
+      {/* 费用说明 */}
+      <div className="text-xs text-muted-foreground p-2 bg-muted/30 rounded border border-border">
+        <strong>总价构成说明：</strong>目标总价 = 限价合计 × (1 - 总下浮率)，该总价包含分部分项清单合价 + 安全文明施工费 + 暂列金额等费用。清单配平后，各清单目标合价之和应等于目标总价。平均下浮率 = 1 - 目标单价/限价单价，反映每条清单相对限价的下浮幅度。
+      </div>
+
       <button
         onClick={handleBalance}
         disabled={loading || !selectedFile}
@@ -136,6 +145,22 @@ export function Step5Panel() {
         </div>
       )}
 
+      {/* 校验结果 */}
+      {validation && (
+        <div className="border border-border rounded p-3">
+          <h3 className="text-sm font-medium mb-2">约束校验</h3>
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <div>总价差额：<span className="font-mono">{fmt(validation.totalDiff)}</span>元</div>
+            <div>差额率：<span className="font-mono">{(validation.totalDiffRate * 100).toFixed(4)}%</span></div>
+            <div>系数违规项：<span className={`font-mono ${validation.coefficientViolationCount > 0 ? 'text-destructive' : 'text-green-600'}`}>{validation.coefficientViolationCount}</span></div>
+            <div>整体校验：<span className={validation.overallPass ? 'text-green-600 font-bold' : 'text-destructive font-bold'}>{validation.overallPass ? '通过' : '未通过'}</span></div>
+          </div>
+          {!validation.coefficientPass && (
+            <div className="text-xs text-destructive mt-1">提示：有清单系数超出0.455~0.845范围（评标规则约束），请调整下浮率或策略分配</div>
+          )}
+        </div>
+      )}
+
       {/* 第二级配平结果 */}
       {level2 && (
         <div>
@@ -156,11 +181,13 @@ export function Step5Panel() {
                   <th className="px-2 py-1.5 text-center">策略</th>
                   <th className="px-2 py-1.5 text-right">目标单价</th>
                   <th className="px-2 py-1.5 text-right">目标合价</th>
+                  <th className="px-2 py-1.5 text-right">平均下浮率</th>
+                  <th className="px-2 py-1.5 text-right">权重</th>
                 </tr>
               </thead>
               <tbody>
                 {level2.items.slice(0, 50).map((it: BalancedItem, i: number) => (
-                  <tr key={i} className="border-t border-border">
+                  <tr key={i} className={`border-t border-border ${it.averageDiscountRate !== undefined && (it.averageDiscountRate > 0.545 || it.averageDiscountRate < 0.155) ? 'bg-amber-50/50' : ''}`}>
                     <td className="px-2 py-1">{it.category}</td>
                     <td className="px-2 py-1 font-mono">{it.code}</td>
                     <td className="px-2 py-1">{it.name}</td>
@@ -169,6 +196,8 @@ export function Step5Panel() {
                     <td className="px-2 py-1 text-center">{it.strategy}</td>
                     <td className="px-2 py-1 text-right font-mono">{fmt(it.targetUnitPrice)}</td>
                     <td className="px-2 py-1 text-right font-mono">{fmt(it.targetTotalPrice)}</td>
+                    <td className="px-2 py-1 text-right font-mono">{((it.averageDiscountRate ?? 0) * 100).toFixed(1)}%</td>
+                    <td className="px-2 py-1 text-right font-mono">{((it.weightRatio ?? 0) * 100).toFixed(2)}%</td>
                   </tr>
                 ))}
               </tbody>

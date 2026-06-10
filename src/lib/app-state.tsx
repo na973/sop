@@ -132,6 +132,10 @@ export interface BalancedItem {
   priceRatio: number;
   targetUnitPrice: number;
   targetTotalPrice: number;
+  /** 本条清单的平均下浮率 = 1 - targetUnitPrice / maxUnitPrice */
+  averageDiscountRate?: number;
+  /** 本条清单占总清单合价的比例 */
+  weightRatio?: number;
 }
 
 /** 步骤6材料调价条目 */
@@ -154,7 +158,19 @@ export interface Step5Data {
 
 /** 步骤6结果 */
 export interface Step6Data {
-  level3: { adjustableResourceCount: number; priceChanges: PriceChange[]; baseTotal: number; iterationLog: Array<{ iteration: number; totalDiff: number; adjustedCount: number }>; method: string };
+  level3: { adjustableResourceCount: number; priceChanges: PriceChange[]; baseTotal: number; iterationLog: Array<{ iteration: number; totalDiff: number; adjustedCount: number }>; method: string; itemDetails?: Array<{
+    code: string;
+    name: string;
+    category: string;
+    targetUnitPrice: number;
+    currentTotalPrice: number;
+    targetTotalPrice: number;
+    diff: number;
+    materialDiff: number;
+    materialOriginalTotal: number;
+    materialTargetTotal: number;
+    adjustedResources: number;
+  }> };
   validation: { targetTotal: number; actualTotal: number; diff: number; pass: boolean; iterations: number; converged: boolean; bestScaleFactor?: number };
   finalSummary: SummaryRow[] | null;
 }

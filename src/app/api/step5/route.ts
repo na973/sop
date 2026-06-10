@@ -4,11 +4,20 @@ import { calculateWorkbook } from '@/lib/formula-engine/engine';
 import { getAnalysisSheets, getMainRows } from '@/lib/bidding/excel-sheets';
 import type { CellValue } from '@/lib/formula-engine/types';
 
-/** 步骤5：清单调价配平 — 总价配平 + 清单配平（三级配平前两级） */
+/** 步骤5：清单调价配平 — 总价配平 + 清单配平（三级配平前两级）
+ *
+ * 重要说明：总价=清单合价+安全文明施工费+暂列金额等费用
+ * 步骤5的目标总价计算逻辑：
+ *   目标总价 = 限价合计 × (1 - 总下浮率)
+ *   该目标总价包含分部分项清单合价+安全文明施工费+暂列金额等
+ *   清单配平的第二级是在分部分项清单层面调整，使清单合价之和等于目标总价中分部分项清单的份额
+ *   如果限价合计中已包含安全文明施工费等，则清单合价之和应等于目标总价
+ *   平均下浮率 = 1 - 目标单价/限价单价，反映每条清单相对限价的下浮幅度
+ */
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { compareItems, table7FileBase64, maxPriceTotal, targetDiscountRate, strategyRules } = body as {
+    const { compareItems, strategyItems, table7FileBase64, maxPriceTotal, targetDiscountRate } = body as {
       compareItems?: Array<{
         row: number;
         category: string;
@@ -20,10 +29,14 @@ export async function POST(request: NextRequest) {
         maxUnitPrice: number;
         maxTotalPrice: number;
       }>;
+      strategyItems?: Array<{
+        row: number;
+        category: string;
+        strategyLevel: string;
+      }>;
       table7FileBase64?: string;
       maxPriceTotal?: number;
       targetDiscountRate?: number;
-      strategyRules?: Array<{ row: number; strategy: string; category: string }>;
     };
 
     if (maxPriceTotal === undefined || targetDiscountRate === undefined) {
@@ -58,8 +71,26 @@ export async function POST(request: NextRequest) {
       maxUnitPrice: item.maxUnitPrice,
     }));
 
+    // 从strategyItems构建strategyRules
+    const strategyRules = (strategyItems ?? []).map(si => ({
+      row: si.row,
+      strategy: si.strategyLevel,
+      category: si.category,
+    }));
+
     // 4. 第二级：清单配平 — 按策略分档调整
-    const balancedItems = listLevelPricing(allItems, targetTotal, strategyRules ?? [], targetDiscountRate);
+    const balancedItems = listLevelPricing(allItems, targetTotal, strategyRules, targetDiscountRate);
+
+    // 计算平均下浮率和权重
+    const totalTarget = balancedItems.reduce((s, i) => s + i.targetTotalPrice, 0);
+    for (const item of balancedItems) {
+      item.averageDiscountRate = item.maxUnitPrice > 0
+        ? round4(1 - item.targetUnitPrice / item.maxUnitPrice)
+        : 0;
+      item.weightRatio = totalTarget > 0
+        ? round4(item.targetTotalPrice / totalTarget)
+        : 0;
+    }
 
     // 5. 校验约束
     const validation = validateConstraints(balancedItems, maxPriceTotal, targetTotal);
@@ -113,6 +144,7 @@ function listLevelPricing(
   quantity: number; unitPrice: number; totalPrice: number;
   maxUnitPrice: number; strategy: string; priceRatio: number;
   targetUnitPrice: number; targetTotalPrice: number;
+  averageDiscountRate: number; weightRatio: number;
 }> {
   const strategyRatioMap = getStrategyRatioMap(averageDiscountRate);
 
@@ -122,7 +154,7 @@ function listLevelPricing(
     const strategy = rule?.strategy ?? '平均';
     const [ratioMin, ratioMax] = strategyRatioMap[strategy] ?? [0.62, 0.66];
     const ratio = (ratioMin + ratioMax) / 2; // 取中间值
-    return { ...item, strategy, priceRatio: ratio };
+    return { ...item, strategy, priceRatio: ratio, averageDiscountRate: 0, weightRatio: 0 };
   });
 
   // 计算初始目标价

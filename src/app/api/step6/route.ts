@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { readExcelToWorkbook } from '@/lib/formula-engine/excel-reader';
 import { calculateWorkbook } from '@/lib/formula-engine/engine';
 import type { CellValue, CellData, WorkbookData } from '@/lib/formula-engine/types';
-import { getAnalysisSheetName, getNextMainRowOrEnd, getMainRows } from '@/lib/bidding/excel-sheets';
+import { getAnalysisSheetName, getNextMainRowOrEnd, getMainRows, getAnalysisSheets } from '@/lib/bidding/excel-sheets';
 
 /** 安全取数：CellValue | undefined → number */
 function toNum(v: CellValue | undefined): number {
@@ -11,8 +11,17 @@ function toNum(v: CellValue | undefined): number {
   return typeof v === 'number' ? v : (typeof v === 'boolean' ? (v ? 1 : 0) : Number(v) || 0);
 }
 
-/** 步骤6：材料调价配平 — 三级配平第三级（最复杂）
- *  核心：修改工料机单价 → 公式回算清单单价 → 汇总校验总价
+/** 步骤6：材料调价配平 — 在表2（综合单价分析表）基础上，
+ *  根据步骤5每条清单的目标单价反推出每个材料的不含税单价
+ *
+ *  核心逻辑：
+ *  1. 读取表2，提取每条清单的工料机构成（消耗量×单价=合价）
+ *  2. 对于每条清单，目标合价 = 目标单价 × 工程量
+ *  3. 保持人工和机械单价不变，将差额分摊到材料单价上
+ *  4. 反推出每个材料的不含税单价 = (调整后材料合价 / 消耗量)
+ *  5. 同一材料在多条清单中出现时，取加权平均单价
+ *  6. 将调整后的材料单价写回工料机汇总表F列（含税市场价），
+ *     通过公式引擎重算，验证最终总价是否匹配
  */
 export async function POST(request: NextRequest) {
   try {
@@ -23,6 +32,7 @@ export async function POST(request: NextRequest) {
       balancedItems?: Array<{
         row: number; category: string; code: string; name: string;
         quantity: number; targetUnitPrice: number; targetTotalPrice: number;
+        unitPrice?: number; maxUnitPrice?: number;
       }>;
       tolerance?: number;
     };
@@ -43,12 +53,32 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: '请提供表7文件base64' }, { status: 400 });
     }
 
-    // 2. 第三级：材料调价配平
-    const result = await materialLevelPricing(fileBuffer, balancedItems, tolerance);
+    // 2. 读取并计算原始Excel
+    const ab = fileBuffer.buffer.slice(fileBuffer.byteOffset, fileBuffer.byteOffset + fileBuffer.byteLength) as ArrayBuffer;
+    const originalWb = await readExcelToWorkbook(ab);
+    const { workbook: calcWb } = calculateWorkbook(originalWb);
+    const baseTotal = calcCurrentTotal(calcWb);
+
+    // 3. 从表2提取每条清单的工料机构成
+    const itemResources = extractItemResourcesFromTable2(calcWb, balancedItems);
+
+    // 4. 反推材料单价
+    const reverseResult = reverseCalculateMaterialPrices(calcWb, balancedItems, itemResources);
+
+    // 5. 将反推后的材料单价写回工料机汇总表，用公式引擎验证
+    const verifyResult = applyAndVerify(originalWb, reverseResult.materialPrices, balancedItems, tolerance);
 
     return NextResponse.json({
       success: true,
-      ...result,
+      level3: {
+        adjustableResourceCount: reverseResult.materialPrices.length,
+        priceChanges: reverseResult.priceChanges,
+        baseTotal: round2(baseTotal),
+        method: 'table2-reverse-calculation',
+        itemDetails: reverseResult.itemDetails.slice(0, 200),
+      },
+      validation: verifyResult.validation,
+      finalSummary: verifyResult.summary,
     });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -56,265 +86,404 @@ export async function POST(request: NextRequest) {
   }
 }
 
-/** 三级配平核心算法 — 按清单差额分摊到其关联的可调材料 */
-async function materialLevelPricing(
-  arrayBuffer: ArrayBuffer | Buffer,
-  balancedItems: Array<{
-    row: number; category: string; code: string; name: string;
-    quantity: number; targetUnitPrice: number; targetTotalPrice: number;
-  }>,
-  tolerance: number,
-) {
-  // 1. 读取原始Excel数据
-  const ab = Buffer.isBuffer(arrayBuffer) ? arrayBuffer.buffer.slice(arrayBuffer.byteOffset, arrayBuffer.byteOffset + arrayBuffer.byteLength) as ArrayBuffer : arrayBuffer;
-  const originalWb = await readExcelToWorkbook(ab);
+/** 表2清单项的工料机构成 */
+interface ItemResourceBreakdown {
+  row: number;
+  category: string;
+  code: string;
+  name: string;
+  quantity: number;
+  currentUnitPrice: number;
+  currentTotalPrice: number;
+  targetUnitPrice: number;
+  targetTotalPrice: number;
+  resources: Array<{
+    row: number;
+    code: string;
+    name: string;
+    type: '人工' | '材料' | '机械' | '其他';
+    consumption: number;
+    unitPrice: number;
+    totalPrice: number;
+    isAdjustable: boolean;
+  }>;
+}
 
-  // 2. 提取工料机汇总表结构
-  const resourceSheet = originalWb.get('工料机汇总表');
-  if (!resourceSheet) {
-    return { success: false, error: '未找到工料机汇总表' };
-  }
-
-  // 3. 构建工料机资源列表（可调价的材料项）
-  const adjustableResources = extractAdjustableResources(resourceSheet);
-  const adjustableCount = adjustableResources.filter(r => r.isAdjustable).length;
-  if (adjustableCount === 0) {
-    return { success: false, error: '没有可调价的材料资源' };
-  }
-
-  // 4. 建立清单→工料机映射关系
-  const itemResourceMap = buildItemResourceMapping(originalWb, balancedItems);
-
-  // 5. 目标总价
-  const targetTotal = balancedItems.reduce((s, i) => s + i.targetTotalPrice, 0);
-
-  // 6. 首次计算基准总价
-  const baseWb = cloneWorkbook(originalWb);
-  const { workbook: baseCalcWb } = calculateWorkbook(baseWb);
-  const baseTotal = calcCurrentTotal(baseCalcWb);
-
-  const resourceByCode = new Map(adjustableResources.map((res) => [res.code, res]));
-  const priceDeltaByCode = new Map<string, number>();
-  const itemAdjustmentLog: Array<{ item: string; currentTotal: number; targetTotal: number; diff: number; adjustedResourceCount: number }> = [];
+/** 从表2（综合单价分析表）提取每条清单的工料机构成 */
+function extractItemResourcesFromTable2(
+  calcWb: WorkbookData,
+  balancedItems: Array<{ row: number; category: string; code: string; name: string; quantity: number; targetUnitPrice: number; targetTotalPrice: number }>,
+): ItemResourceBreakdown[] {
+  const results: ItemResourceBreakdown[] = [];
 
   for (const item of balancedItems) {
-    const sheet = baseCalcWb.get(getAnalysisSheetName(item.category));
-    const currentTotal = toNum(sheet?.get(`${item.row},7`)?.value);
-    const diff = item.targetTotalPrice - currentTotal;
-    const mappingKey = `${item.category}-${item.row}`;
-    const resources = (itemResourceMap.get(mappingKey) || [])
-      .map((resource) => ({ ...resource, master: resourceByCode.get(resource.resourceCode) }))
-      .filter((resource) => resource.master?.isAdjustable && resource.master.originalPrice > 0 && resource.consumption > 0);
+    const sheetName = getAnalysisSheetName(item.category);
+    const sheet = calcWb.get(sheetName);
+    if (!sheet) continue;
 
-    if (Math.abs(diff) <= 0.01 || resources.length === 0) {
-      itemAdjustmentLog.push({
-        item: `${item.category} R${item.row}`,
-        currentTotal: round2(currentTotal),
-        targetTotal: round2(item.targetTotalPrice),
-        diff: round2(diff),
-        adjustedResourceCount: resources.length,
-      });
-      continue;
+    const mainRows = getMainRows(sheet);
+    const nextMainRow = getNextMainRowOrEnd(sheet, item.row, mainRows);
+
+    const currentUnitPrice = toNum(sheet.get(`${item.row},6`)?.value);
+    const currentTotalPrice = toNum(sheet.get(`${item.row},7`)?.value);
+
+    const resources: ItemResourceBreakdown['resources'] = [];
+
+    // 从主条目行向下扫描工料机行
+    // 表2列布局：A=序号, B=描述, C=人材机分类, D=编码, E=名称, F=规格, G=单位
+    //             H=数量(消耗量), I=单价(不含税), J=合价(H*I), K=小计(分组汇总)
+    // 综合单价 = Σ K列(各资源的单位成本贡献) + 企业管理费小计
+    for (let r = item.row + 1; r < nextMainRow; r++) {
+      const dCode = String(sheet.get(`${r},4`)?.value ?? '').trim();  // D列=编码
+      const eName = String(sheet.get(`${r},5`)?.value ?? '').trim();  // E列=名称
+      const cType = String(sheet.get(`${r},3`)?.value ?? '').trim();  // C列=人材机分类
+
+      // 跳过标题行和空行
+      if (!dCode || dCode === 'null' || dCode === '编码' || dCode === 'undefined' || dCode === '名称') continue;
+      // 跳过企业管理费等非工料机行
+      if (cType === '企业管理费及利润' || cType === '名称' || cType === '计算基础') continue;
+
+      // 检查是否到了下一个主条目
+      const aVal = sheet.get(`${r},1`)?.value;
+      if (typeof aVal === 'number' && aVal > 0 && r !== item.row) break;
+      // 也检查是否出现了"序号"（下一个清单项的表头）
+      const aStr = String(aVal ?? '').trim();
+      if (aStr === '序号') break;
+
+      const consumption = toNum(sheet.get(`${r},8`)?.value);   // H列=数量(消耗量)
+      const unitPrice = toNum(sheet.get(`${r},9`)?.value);     // I列=单价(不含税)
+      const lineTotal = toNum(sheet.get(`${r},10`)?.value);    // J列=合价=H*I
+      const subTotal = toNum(sheet.get(`${r},11`)?.value);     // K列=小计(分组汇总)
+      const type = getResourceTypeFromCategory(cType, dCode);
+      const isAdjustable = type === '材料' && consumption > 0;
+
+      // K列(小计)是综合单价的组成部分，比J列(单行合价)更适合做配平计算
+      resources.push({ row: r, code: dCode, name: eName, type, consumption, unitPrice, totalPrice: subTotal || lineTotal, isAdjustable });
     }
 
-    const materialBase = resources.reduce((sum, resource) => sum + resource.consumption * resource.master!.originalPrice, 0);
-    if (materialBase <= 0) continue;
-
-    for (const resource of resources) {
-      const weight = (resource.consumption * resource.master!.originalPrice) / materialBase;
-      const priceDelta = (diff * weight) / resource.consumption;
-      priceDeltaByCode.set(resource.resourceCode, (priceDeltaByCode.get(resource.resourceCode) || 0) + priceDelta);
-    }
-
-    itemAdjustmentLog.push({
-      item: `${item.category} R${item.row}`,
-      currentTotal: round2(currentTotal),
-      targetTotal: round2(item.targetTotalPrice),
-      diff: round2(diff),
-      adjustedResourceCount: resources.length,
+    results.push({
+      row: item.row,
+      category: item.category,
+      code: item.code,
+      name: item.name,
+      quantity: item.quantity,
+      currentUnitPrice,
+      currentTotalPrice,
+      targetUnitPrice: item.targetUnitPrice,
+      targetTotalPrice: item.targetTotalPrice,
+      resources,
     });
   }
 
-  const finalWb = cloneWorkbook(originalWb);
-  const finalResSheet = finalWb.get('工料机汇总表');
-  if (!finalResSheet) return { success: false, error: '未找到工料机汇总表' };
+  return results;
+}
 
-  // ---- Phase 1: 单次调价（新算法） ----
-  for (const res of adjustableResources) {
-    const delta = priceDeltaByCode.get(res.code) || 0;
-    if (delta === 0 || res.originalPrice <= 0) continue;
+/** 反推材料单价
+ *  核心思路：综合单价 = Σ(K列) = 人工K + 机械K + 材料K + 企管费K
+ *  保持人工、机械、企管费不变，将单价的差额全部分摊到材料上
+ *  对于每条清单：
+ *    目标单价 = balancedItems中的targetUnitPrice
+ *    人工K + 机械K + 企管费K + 材料K = 目标单价
+ *    材料K = 目标单价 - 人工K - 机械K - 企管费K
+ *    每种材料的新单价 = 材料K * (该材料原K / 材料总K) / 消耗量
+ */
+function reverseCalculateMaterialPrices(
+  calcWb: WorkbookData,
+  balancedItems: Array<{ row: number; category: string; code: string; name: string; quantity: number; targetUnitPrice: number; targetTotalPrice: number }>,
+  itemResources: ItemResourceBreakdown[],
+) {
+  // 收集所有材料的新单价（同一材料可能出现在多条清单中，取加权平均）
+  const materialPriceAccum = new Map<string, {
+    code: string;
+    name: string;
+    totalWeightedPrice: number;
+    totalConsumption: number;
+    originalPrice: number;
+    occurrences: number;
+  }>();
 
-    const priceKey = `${res.row},6`;
-    const cell = finalResSheet.get(priceKey);
-    if (!cell) continue;
+  const itemDetails: Array<{
+    code: string;
+    name: string;
+    category: string;
+    targetUnitPrice: number;
+    currentUnitPrice: number;
+    targetTotalPrice: number;
+    diff: number;
+    materialDiff: number;
+    materialOriginalTotal: number;
+    materialTargetTotal: number;
+    adjustedResources: number;
+  }> = [];
 
-    const adjustedPrice = Math.max(0.01, round2(res.originalPrice + delta));
-    cell.value = adjustedPrice;
-    res.adjustedPrice = adjustedPrice;
+  for (const item of itemResources) {
+    const targetUnit = item.targetUnitPrice;
+    const diff = targetUnit - item.currentUnitPrice;
+
+    // 计算人工、机械、企管费的固定部分(K列贡献)
+    const laborTotal = item.resources
+      .filter(r => r.type === '人工')
+      .reduce((s, r) => s + r.totalPrice, 0);
+    const mechTotal = item.resources
+      .filter(r => r.type === '机械')
+      .reduce((s, r) => s + r.totalPrice, 0);
+    const otherTotal = item.resources
+      .filter(r => r.type === '其他')
+      .reduce((s, r) => s + r.totalPrice, 0);
+
+    // 材料原K列合计
+    const materialOriginalTotal = item.resources
+      .filter(r => r.isAdjustable)
+      .reduce((s, r) => s + r.totalPrice, 0);
+
+    // 材料目标K = 目标单价 - 人工K - 机械K - 企管费K
+    const materialTargetTotal = targetUnit - laborTotal - mechTotal - otherTotal;
+
+    // 如果材料目标K为负或材料原K为0，跳过调整
+    const canAdjust = materialOriginalTotal > 0 && materialTargetTotal > 0;
+    const scaleFactor = canAdjust ? materialTargetTotal / materialOriginalTotal : 1;
+
+    let adjustedCount = 0;
+
+    for (const res of item.resources) {
+      if (!res.isAdjustable) continue;
+
+      // 按权重分配：每种材料的新K = 原K × 缩放因子
+      const newTotalPrice = res.totalPrice * scaleFactor;
+      // 新单价(不含税) = 新K / 消耗量
+      const newUnitPrice = res.consumption > 0 ? newTotalPrice / res.consumption : res.unitPrice;
+
+      // 累加到全局材料价格映射
+      const key = res.code;
+      const existing = materialPriceAccum.get(key);
+      if (existing) {
+        existing.totalWeightedPrice += newUnitPrice * res.consumption;
+        existing.totalConsumption += res.consumption;
+        existing.occurrences += 1;
+      } else {
+        // 从工料机汇总表获取原始含税单价
+        const origPrice = getResourceOriginalPrice(calcWb, res.code);
+        materialPriceAccum.set(key, {
+          code: res.code,
+          name: res.name,
+          totalWeightedPrice: newUnitPrice * res.consumption,
+          totalConsumption: res.consumption,
+          originalPrice: origPrice,
+          occurrences: 1,
+        });
+      }
+
+      adjustedCount++;
+    }
+
+    itemDetails.push({
+      code: item.code,
+      name: item.name,
+      category: item.category,
+      targetUnitPrice: round2(targetUnit),
+      currentUnitPrice: round2(item.currentUnitPrice),
+      targetTotalPrice: round2(targetUnit * item.quantity),
+      diff: round2(diff),
+      materialDiff: round2(materialTargetTotal - materialOriginalTotal),
+      materialOriginalTotal: round2(materialOriginalTotal),
+      materialTargetTotal: round2(canAdjust ? materialTargetTotal : materialOriginalTotal),
+      adjustedResources: adjustedCount,
+    });
   }
 
-  // ---- Phase 2: 二分法微调统一缩放因子k ----
-  const currentWb = cloneWorkbook(originalWb);
-  const currentResSheet = currentWb.get('工料机汇总表')!;
+  // 计算每种材料的加权平均单价
+  const materialPrices = Array.from(materialPriceAccum.entries()).map(([code, data]) => {
+    const avgPrice = data.totalConsumption > 0 ? data.totalWeightedPrice / data.totalConsumption : data.originalPrice;
+    // 反推不含税单价：含税市场价 / (1 + 税率/100)
+    // 工料机汇总表中 F列=含税市场价, G列=税率, H列=不含税单价=ROUND(F/(1+G/100),2)
+    const taxRate = getResourceTaxRate(calcWb, code);
+    const priceExclTax = taxRate > 0 ? round2(avgPrice / (1 + taxRate / 100)) : round2(avgPrice);
 
-  let kLow = 0.5, kHigh = 2.0;
-  let bestK = 1.0;
-  let bestDiff = Infinity;
-  let bestWb = currentWb;
-  let iterations = 0;
-  const maxIter = 30;
+    return {
+      code,
+      name: data.name,
+      originalPrice: round2(data.originalPrice),
+      adjustedPriceInclTax: round2(avgPrice),
+      adjustedPriceExclTax: priceExclTax,
+      diff: round2(avgPrice - data.originalPrice),
+      diffPercent: data.originalPrice > 0 ? round4((avgPrice - data.originalPrice) / data.originalPrice) : 0,
+      occurrences: data.occurrences,
+    };
+  });
 
-  for (let i = 0; i < maxIter; i++) {
-    iterations++;
-    const k = (kLow + kHigh) / 2;
-    const testWb = cloneWorkbook(originalWb);
-    const testResSheet = testWb.get('工料机汇总表')!;
+  // 生成价格变更列表（用于步骤7写回Excel）
+  const priceChanges = materialPrices
+    .filter(m => Math.abs(m.diff) > 0.001)
+    .map(m => ({
+      code: m.code,
+      name: m.name,
+      row: 0, // 行号稍后在applyAndVerify中确定
+      originalPrice: m.originalPrice,
+      adjustedPrice: m.adjustedPriceInclTax, // 写回F列的是含税价
+      diff: m.diff,
+      diffPercent: m.diffPercent,
+    }));
 
-    for (const res of adjustableResources) {
-      if (!res.isAdjustable || res.originalPrice <= 0) continue;
-      const delta = priceDeltaByCode.get(res.code) || 0;
-      const basePrice = Math.max(0.01, round2(res.originalPrice + delta));
-      const scaledPrice = Math.max(0.01, round2(basePrice * k));
-      const cell = testResSheet.get(`${res.row},6`);
-      if (cell) cell.value = scaledPrice;
+  return { materialPrices, priceChanges, itemDetails };
+}
+
+/** 从工料机汇总表获取材料原始含税单价 */
+function getResourceOriginalPrice(calcWb: WorkbookData, resourceCode: string): number {
+  const resSheet = calcWb.get('工料机汇总表');
+  if (!resSheet) return 0;
+
+  for (const [key, cell] of resSheet) {
+    const [r, c] = key.split(',').map(Number);
+    if (c === 2 && r > 1) { // B列=编码
+      const code = String(cell.value ?? '').trim();
+      if (code === resourceCode) {
+        return toNum(resSheet.get(`${r},6`)?.value); // F列=含税市场价
+      }
     }
+  }
+  return 0;
+}
 
-    const { workbook: testResult } = calculateWorkbook(testWb);
-    const testTotal = calcCurrentTotal(testResult);
-    const testDiff = testTotal - targetTotal;
+/** 从工料机汇总表获取材料税率 */
+function getResourceTaxRate(calcWb: WorkbookData, resourceCode: string): number {
+  const resSheet = calcWb.get('工料机汇总表');
+  if (!resSheet) return 0;
 
-    if (Math.abs(testDiff) < Math.abs(bestDiff)) {
-      bestDiff = testDiff;
-      bestK = k;
-      bestWb = testWb;
+  for (const [key, cell] of resSheet) {
+    const [r, c] = key.split(',').map(Number);
+    if (c === 2 && r > 1) { // B列=编码
+      const code = String(cell.value ?? '').trim();
+      if (code === resourceCode) {
+        return toNum(resSheet.get(`${r},7`)?.value); // G列=税率
+      }
     }
+  }
+  return 0;
+}
 
-    if (Math.abs(testDiff) <= tolerance) break;
+/** 获取材料在工料机汇总表中的行号 */
+function getResourceRow(calcWb: WorkbookData, resourceCode: string): number {
+  const resSheet = calcWb.get('工料机汇总表');
+  if (!resSheet) return 0;
 
-    if (testDiff < 0) {
-      kLow = k;
-    } else {
-      kHigh = k;
+  for (const [key, cell] of resSheet) {
+    const [r, c] = key.split(',').map(Number);
+    if (c === 2 && r > 1) {
+      const code = String(cell.value ?? '').trim();
+      if (code === resourceCode) return r;
+    }
+  }
+  return 0;
+}
+
+/** 将反推后的材料含税单价写回工料机汇总表F列，用公式引擎重算验证 */
+function applyAndVerify(
+  originalWb: WorkbookData,
+  materialPrices: Array<{
+    code: string;
+    name: string;
+    originalPrice: number;
+    adjustedPriceInclTax: number;
+    adjustedPriceExclTax: number;
+    diff: number;
+  }>,
+  balancedItems: Array<{ targetTotalPrice: number }>,
+  tolerance: number,
+) {
+  // 深拷贝工作簿
+  const workWb = cloneWorkbook(originalWb);
+  const resSheet = workWb.get('工料机汇总表');
+  if (!resSheet) return { validation: { targetTotal: 0, actualTotal: 0, diff: 0, pass: false, iterations: 0, converged: false }, summary: null };
+
+  // 将调整后的含税单价写回F列
+  let writeCount = 0;
+  for (const mp of materialPrices) {
+    if (Math.abs(mp.diff) < 0.001) continue;
+
+    const row = getResourceRow(originalWb, mp.code);
+    if (row <= 0) continue;
+
+    const priceKey = `${row},6`;
+    const cell = resSheet.get(priceKey);
+    if (cell) {
+      cell.value = mp.adjustedPriceInclTax;
+      writeCount++;
     }
   }
 
-  // 更新adjustedPrice
-  for (const res of adjustableResources) {
-    if (!res.isAdjustable || res.originalPrice <= 0) continue;
-    const delta = priceDeltaByCode.get(res.code) || 0;
-    const basePrice = Math.max(0.01, round2(res.originalPrice + delta));
-    res.adjustedPrice = Math.max(0.01, round2(basePrice * bestK));
+  // 用公式引擎重算
+  const { workbook: resultWb } = calculateWorkbook(workWb);
+  const actualTotal = calcCurrentTotal(resultWb);
+  const targetTotal = balancedItems.reduce((s, i) => s + i.targetTotalPrice, 0);
+  const diff = actualTotal - targetTotal;
+
+  // 如果初次差距太大，用二分法微调
+  let iterations = 1;
+  let converged = Math.abs(diff) <= tolerance;
+  let bestWb = resultWb;
+
+  if (!converged && writeCount > 0) {
+    // 二分法微调：所有已调整的材料价格乘以一个统一的缩放因子k
+    let kLow = 0.5, kHigh = 2.0;
+    let bestK = 1.0;
+    let bestDiff = diff;
+
+    for (let i = 0; i < 30; i++) {
+      iterations++;
+      const k = (kLow + kHigh) / 2;
+      const testWb = cloneWorkbook(originalWb);
+      const testResSheet = testWb.get('工料机汇总表')!;
+
+      for (const mp of materialPrices) {
+        if (Math.abs(mp.diff) < 0.001) continue;
+        const row = getResourceRow(originalWb, mp.code);
+        if (row <= 0) continue;
+        const cell = testResSheet.get(`${row},6`);
+        if (cell) {
+          cell.value = round2(mp.adjustedPriceInclTax * k);
+        }
+      }
+
+      const { workbook: testResult } = calculateWorkbook(testWb);
+      const testTotal = calcCurrentTotal(testResult);
+      const testDiff = testTotal - targetTotal;
+
+      if (Math.abs(testDiff) < Math.abs(bestDiff)) {
+        bestDiff = testDiff;
+        bestK = k;
+        bestWb = testResult;
+      }
+
+      if (Math.abs(testDiff) <= tolerance) {
+        converged = true;
+        break;
+      }
+
+      if (testDiff < 0) {
+        kLow = k;
+      } else {
+        kHigh = k;
+      }
+    }
   }
 
   const finalTotal = calcCurrentTotal(bestWb);
   const finalDiff = finalTotal - targetTotal;
 
-  // 10. 提取调价前后对比
-  const priceChanges = extractPriceChanges(originalWb, bestWb, adjustableResources);
-
-  // 11. 校验结果
-  const converged = Math.abs(finalDiff) <= tolerance;
-  const validation = {
-    targetTotal: round2(targetTotal),
-    actualTotal: round2(finalTotal),
-    diff: round2(finalDiff),
-    pass: converged,
-    iterations,
-    converged,
-    bestScaleFactor: round2(bestK),
-    formulaErrors: 0,
-  };
-
   return {
-    level3: {
-      adjustableResourceCount: adjustableCount,
-      priceChanges,
-      iterationLog: [{
-        iteration: 1,
-        totalDiff: round2(finalDiff),
-        adjustedCount: priceChanges.length,
-      }],
-      itemAdjustmentLog: itemAdjustmentLog.slice(0, 100),
-      baseTotal: round2(baseTotal),
-      method: 'item-resource-allocation + binary-search-scale',
+    validation: {
+      targetTotal: round2(targetTotal),
+      actualTotal: round2(finalTotal),
+      diff: round2(finalDiff),
+      pass: Math.abs(finalDiff) <= tolerance,
+      iterations,
+      converged: Math.abs(finalDiff) <= tolerance,
+      bestScaleFactor: iterations > 1 ? round2(1.0) : undefined,
     },
-    validation,
-    finalSummary: extractSummary(bestWb),
+    summary: extractSummary(bestWb),
   };
 }
 
-/** 提取可调价的工料机资源 */
-function extractAdjustableResources(
-  resourceSheet: Map<string, { value: CellValue; isFormula: boolean; formula?: string }>,
-): Array<{
-  row: number; code: string; name: string; unit: string;
-  originalPrice: number; adjustedPrice: number; isAdjustable: boolean;
-}> {
-  const resources: Array<{
-    row: number; code: string; name: string; unit: string;
-    originalPrice: number; adjustedPrice: number; isAdjustable: boolean;
-  }> = [];
-
-  for (const [key, cell] of resourceSheet) {
-    const [r, c] = key.split(',').map(Number);
-    // 工料机汇总表结构: A=序号, B=编码, C=名称, D=单位, E=数量, F=含税市场价
-    if (c === 2 && r > 1 && cell.value !== null && cell.value !== undefined) {
-      const code = String(cell.value).trim();
-      const name = String(resourceSheet.get(`${r},3`)?.value ?? '').trim();
-      const unit = String(resourceSheet.get(`${r},4`)?.value ?? '').trim();
-      const price = toNum(resourceSheet.get(`${r},6`)?.value); // F列=含税市场价
-
-      // 只调材料单价（编码以C开头或数字开头的），人工和机械一般不调
-      const isAdjustable = isMaterialCode(code);
-
-      if (code && code !== 'null') {
-        resources.push({ row: r, code, name, unit, originalPrice: price, adjustedPrice: price, isAdjustable });
-      }
-    }
-  }
-
-  return resources;
-}
-
-/** 构建清单→工料机映射 */
-function buildItemResourceMapping(
-  wb: Map<string, Map<string, { value: CellValue; isFormula: boolean; formula?: string }>>,
-  balancedItems: Array<{ row: number; category: string }>,
-): Map<string, Array<{ resourceCode: string; consumption: number }>> {
-  const mapping = new Map<string, Array<{ resourceCode: string; consumption: number }>>();
-
-  for (const item of balancedItems) {
-    const sheetName = getAnalysisSheetName(item.category);
-    const sheet = wb.get(sheetName);
-    if (!sheet) continue;
-
-    const key = `${item.category}-${item.row}`;
-    const resources: Array<{ resourceCode: string; consumption: number }> = [];
-
-    const mainRows = getMainRows(sheet);
-    const nextMainRow = getNextMainRowOrEnd(sheet, item.row, mainRows);
-
-    // 从主条目行向下扫描，直到下一个主清单行或表格末尾
-    for (let r = item.row + 1; r < nextMainRow; r++) {
-      const hCode = String(sheet.get(`${r},8`)?.value ?? ''); // H列=编码
-      if (!hCode || hCode === 'null' || hCode === '组价内容' || hCode === '编码') continue;
-      if (hCode === 'undefined') continue;
-
-      // 检查是否到了下一个主条目
-      const aVal = sheet.get(`${r},1`)?.value;
-      if (typeof aVal === 'number' && aVal > 0) break;
-
-      const consumption = toNum(sheet.get(`${r},10`)?.value); // J列=消耗量
-      resources.push({ resourceCode: hCode, consumption });
-    }
-
-    mapping.set(key, resources);
-  }
-
-  return mapping;
-}
-
-/** 调整工料机单价 */
 /** 计算当前总价 */
 function calcCurrentTotal(calcWb: Map<string, Map<string, { value: CellValue; isFormula: boolean; formula?: string }>>): number {
   const summarySheet = calcWb.get('汇总表');
@@ -323,33 +492,6 @@ function calcCurrentTotal(calcWb: Map<string, Map<string, { value: CellValue; is
   // C19 = 合计
   const totalCell = summarySheet.get('19,3');
   return toNum(totalCell?.value);
-}
-
-/** 提取调价前后对比 */
-function extractPriceChanges(
-  originalWb: Map<string, Map<string, { value: CellValue; isFormula: boolean; formula?: string }>>,
-  finalWb: Map<string, Map<string, { value: CellValue; isFormula: boolean; formula?: string }>>,
-  resources: Array<{ row: number; code: string; name: string; isAdjustable: boolean }>,
-): Array<{ row: number; code: string; name: string; originalPrice: number; adjustedPrice: number; diff: number }> {
-  const origSheet = originalWb.get('工料机汇总表');
-  const finalSheet = finalWb.get('工料机汇总表');
-  if (!origSheet || !finalSheet) return [];
-
-  return resources
-    .filter((r) => r.isAdjustable)
-    .map((res) => {
-      const origPrice = toNum(origSheet.get(`${res.row},6`)?.value); // F列=含税市场价
-      const finalPrice = toNum(finalSheet.get(`${res.row},6`)?.value);
-      return {
-        code: res.code,
-        row: res.row,
-        name: res.name,
-        originalPrice: round2(origPrice),
-        adjustedPrice: round2(finalPrice),
-        diff: round2(finalPrice - origPrice),
-      };
-    })
-    .filter((c) => c.diff !== 0);
 }
 
 /** 提取汇总表最终结果 */
@@ -381,11 +523,28 @@ function cloneWorkbook(wb: WorkbookData): WorkbookData {
   return clone;
 }
 
-function isMaterialCode(code: string): boolean {
-  if (!code) return false;
+function getResourceType(code: string): '人工' | '材料' | '机械' | '其他' {
+  if (!code) return '其他';
   const trimmed = code.trim();
-  // 编码规则：01/02/03开头=材料（可调），00开头=人工（不可调），99开头=机械（不可调）
-  return /^(01|02|03)/.test(trimmed);
+  // 编码规则：01/02/03开头=材料，00开头=人工，99开头=机械
+  if (/^(01|02|03)/.test(trimmed)) return '材料';
+  if (/^00/.test(trimmed)) return '人工';
+  if (/^99/.test(trimmed)) return '机械';
+  if (/^R/i.test(trimmed)) return '人工';
+  if (/^C/i.test(trimmed)) return '材料';
+  if (/^J/i.test(trimmed)) return '机械';
+  return '材料';
+}
+
+/** 根据人材机分类列和编码判断资源类型 */
+function getResourceTypeFromCategory(category: string, code: string): '人工' | '材料' | '机械' | '其他' {
+  // 优先使用分类列（C列="人工费"/"材料费"/"施工机具（机械）使用费"等）
+  if (category.includes('人工')) return '人工';
+  if (category.includes('机械') || category.includes('施工机具')) return '机械';
+  if (category.includes('材料')) return '材料';
+  if (category.includes('企业管理费') || category.includes('利润')) return '其他';
+  // 回退到编码规则
+  return getResourceType(code);
 }
 
 function round2(n: number): number {

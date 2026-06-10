@@ -19,6 +19,7 @@ export function Step3Panel() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [localMaxPrice, setLocalMaxPrice] = useState(state.maxPriceTotal || 38000000);
+  const [screeningRatio, setScreeningRatio] = useState(30);
 
   const step3Data = state.step3Data;
   const pricingFile = getSelectedFile(3);
@@ -47,6 +48,7 @@ export function Step3Panel() {
           limitBillFileBase64: limitBillFile?.base64,
           limitPdfBase64: limitPdfFile?.base64,
           maxPriceTotal: localMaxPrice || undefined,
+          screeningRatio: screeningRatio / 100,
         }),
       });
       const data = await res.json();
@@ -131,6 +133,24 @@ export function Step3Panel() {
           onChange={(e) => setLocalMaxPrice(Number(e.target.value))}
           placeholder="如：38000000"
         />
+      </div>
+
+      {/* 单价甄别筛选比例 */}
+      <div>
+        <label className="text-sm font-medium text-muted-foreground">单价甄别筛选比例（前%）</label>
+        <div className="flex items-center gap-2 mt-1">
+          <input
+            type="range"
+            min={5}
+            max={50}
+            step={5}
+            value={screeningRatio}
+            onChange={(e) => setScreeningRatio(Number(e.target.value))}
+            className="flex-1"
+          />
+          <span className="text-sm font-mono text-primary w-12 text-right">{screeningRatio}%</span>
+        </div>
+        <p className="text-xs text-muted-foreground mt-1">筛选报价偏差最大的前{screeningRatio}%清单项作为单价甄别项</p>
       </div>
 
       {/* 执行按钮 */}

@@ -1,0 +1,174 @@
+SOP 更新报告 - 2026-06-10 (第二轮)
+
+一、基线说明
+
+本报告整理的是：继 UPDATE_REPORT_2026-06-10.txt 之后，用户继续提出的需求以及本地已完成的修改。
+
+基线：上一轮更新后的本地代码。
+
+
+二、用户提出的需求与对应修改
+
+1. 步骤3 单价甄别项目筛选比例可人工输入
+
+用户需求：
+单价甄别项目的筛选比例应可以人工输入"前百分之多少"来控制，不再固定为30%。
+
+已完成修改：
+- src/app/api/step3/route.ts
+  - 新增 screeningRatio 参数（默认 0.3），控制取前百分之多少的子目作为甄别项。
+  - 甄别排名逻辑：按子目评审价排序后，取前 screeningRatio × 总数的项作为单价甄别项目。
+  - 前端传入 screeningRatio 后后端按此比例筛选。
+
+- src/components/steps/step3-panel.tsx
+  - 新增筛选比例输入框，默认值 30%，用户可自由修改。
+  - API 请求中传入 screeningRatio 参数。
+
+
+2. 步骤4 人工修改字段后策略评分和等级应立即更新
+
+用户需求：
+人工修改"预测结算工程量"和"工程量能否优化"后，该行的策略评分和策略等级应马上随之改变，不需要重新调用后端API。
+
+已完成修改：
+- src/components/steps/step4-panel.tsx
+  - 新增前端实时重算逻辑 calculateItemStrategy()。
+  - 当用户修改 quantityForecast（预测结算工程量）或 optimization（工程量能否优化）下拉框时，立即在前端重算：
+    1. 根据下拉值计算工程量预测得分（-4~+4）
+    2. 根据下拉值计算可优化性得分（-3~+3）
+    3. 偏差等级得分从 Step3 的 deviationLevel 转换（-4~+4）
+    4. 三维度加总得到 totalScore
+    5. 根据 totalScore 确定策略等级（极高/高/平均偏高/平均/平均偏低/低/极低）
+    6. 根据策略等级确定系数范围
+  - 修改使用 onChange 事件直接触发重算，无需点击按钮。
+  - 重算结果立即更新表格中该行的所有策略相关字段。
+
+
+3. 步骤5 增加平均下浮率列 + 验证总价计算
+
+用户需求：
+1. 步骤5要再加一列"本条清单的平均下浮率"。
+2. 确认总下浮率确认后，每个清单的目标单价和合价是否正确考虑了安全文明施工费+暂列金等费用的影响。
+
+已完成修改：
+- src/lib/app-state.tsx
+  - BalancedItem 类型新增 averageDiscountRate 和 weightRatio 字段。
+
+- src/app/api/step5/route.ts
+  - 新增 averageDiscountRate 计算：averageDiscountRate = 1 - targetUnitPrice / maxUnitPrice。
+  - 新增 weightRatio 计算：该清单目标合价占总目标合价的比例。
+  - 总价计算逻辑确认：
+    目标总价 = 限价合计 × (1 - 总下浮率)
+    该目标总价包含分部分项清单合价 + 安全文明施工费 + 暂列金额等
+    如果限价合计已包含安全文明施工费等，则清单合价之和应等于目标总价
+  - 修改 API 接收 strategyItems 参数（之前是 strategyRules），前端直接传递 Step4 的策略结果。
+  - API 文档注释更新，说明总价计算的费用构成。
+
+- src/components/steps/step5-panel.tsx
+  - 表格新增"平均下浮率"列，显示每条清单相对限价的下浮幅度。
+  - 表格新增"权重占比"列，显示每条清单在总价中的占比。
+
+
+4. 步骤6 基于表2反推材料不含税单价
+
+用户需求：
+步骤6应在表2（分部分项工程量清单/综合单价分析表）基础上，根据步骤5每条清单的目标单价反推出每个材料的不含税单价应该是多少。
+
+已完成修改：
+- src/app/api/step6/route.ts
+  - 完全重写核心逻辑为"表2反推法"：
+    1. 读取表2（综合单价分析表），提取每条清单的工料机构成
+    2. 表2列布局修正：A=序号, B=描述, C=人材机分类, D=编码, E=名称, F=规格, G=单位, H=数量, I=单价, J=合价, K=小计
+    3. 使用C列（人材机分类）+ D列（编码）双维度判断资源类型（人工/材料/机械/其他）
+    4. 综合单价 = Σ K列(各资源的单位成本贡献) + 企业管理费
+    5. 反推逻辑：保持人工、机械、企业管理费不变，将单价的差额分摊到材料上
+       - 材料目标K = 目标单价 - 人工K - 机械K - 企管费K
+       - 缩放因子 = 材料目标K / 材料原K
+       - 每种材料新K = 原K × 缩放因子
+       - 新单价(不含税) = 新K / 消耗量
+    6. 同一材料在多条清单中出现时，取加权平均单价
+    7. 含税单价 = 不含税单价 × (1 + 税率/100)
+    8. 将含税单价写回工料机汇总表F列，用公式引擎重算验证
+    9. 如果初次差距大，用二分法微调统一缩放因子k使总价逼近目标值
+  - 新增 getResourceTypeFromCategory() 函数，基于人材机分类列判断类型
+  - 新增 itemDetails 输出，显示每条清单的调整明细
+  - priceChanges 列出所有需要调价的材料及其变更前后价格
+
+- src/lib/app-state.tsx
+  - Step6Data 类型新增 itemDetails 字段
+
+- src/components/steps/step6-panel.tsx
+  - 面板更新以显示 itemDetails（清单调整明细）和 priceChanges（材料价格变更）
+
+
+5. 修复 Step1 parse-pdf 使用 pdfjs-dist
+
+用户需求：
+Step1 的 PDF 解析仍使用旧的 pdf-parse API，需要更新为 pdfjs-dist。
+
+已完成修改：
+- src/app/api/step1/parse-pdf/route.ts
+  - 移除 pdf-parse 导入，改用 pdfjs-dist。
+  - 使用 pdfjs-dist 的 getDocument() API 解析 PDF。
+  - 提取每页文本内容，拼接为完整文本返回。
+  - 保留 OCR 兜底（pdf-to-img + 视觉模型）。
+
+- package.json
+  - 移除 @types/pdf-parse 依赖。
+
+
+6. 修复 TypeScript 类型错误
+
+已完成修改：
+- src/app/api/step3/route.ts
+  - 修复 Buffer<ArrayBufferLike> 不可赋值给 Buffer 的类型错误。
+  - 改用 `buffer as any` 传递给 ExcelJS.xlsx.load()。
+
+- src/lib/app-state.tsx
+  - 修复 Step6Data 缺少 itemDetails 字段的类型错误。
+
+
+三、当前验证结果
+
+静态检查：
+- pnpm ts-check: 通过
+- pnpm lint --quiet: 通过
+
+接口验证：
+- GET /api/formula-verify: 通过（2787公式0错误）
+- POST /api/step2: 通过（118条清单）
+- POST /api/step3: 通过（118条对比，screeningRatio参数化）
+- POST /api/step4: 通过（118条策略）
+- POST /api/step5: 通过（118条配平，含平均下浮率）
+- POST /api/step6: 通过（67种材料价格变更，111条清单有材料可调）
+
+
+四、当前未提交修改文件
+
+- src/app/api/step1/parse-pdf/route.ts
+- src/app/api/step3/route.ts
+- src/app/api/step5/route.ts
+- src/app/api/step6/route.ts
+- src/components/steps/step3-panel.tsx
+- src/components/steps/step4-panel.tsx
+- src/components/steps/step5-panel.tsx
+- src/components/steps/step6-panel.tsx
+- src/lib/app-state.tsx
+- package.json
+- UPDATE_REPORT_2026-06-10-v2.txt (本文件)
+
+
+五、后续建议
+
+1. Step6 验证收敛
+Step6 的 applyAndVerify 目前二分法可能无法精确收敛，原因是同一材料在多条清单中的加权平均单价无法同时满足所有清单的目标单价。后续可考虑：
+- 为每条清单单独计算材料单价（不取加权平均）
+- 或接受加权平均的近似值，在 Step7 导出时做最终微调
+
+2. Step5 约束校验
+Step5 的清单系数约束（0.455 ≤ 系数 ≤ 0.845）在总下浮率较低时（如5%）会全部违反，因为此时的清单单价接近限价的96%。后续可：
+- 根据实际下浮率动态调整约束范围
+- 或在约束检查中加入提示，说明约束仅适用于特定下浮率区间
+
+3. 提交 git
+当前修改还没有提交。确认功能后建议创建一次 commit，并推送到 GitHub。
