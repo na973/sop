@@ -11,7 +11,7 @@ export function Step5Panel() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [localMaxPrice, setLocalMaxPrice] = useState(state.maxPriceTotal || 38000000);
-  const [localDiscountRate, setLocalDiscountRate] = useState(state.targetDiscountRate || 5);
+  const [localDiscountRate, setLocalDiscountRate] = useState(state.targetDiscountRate <= 1 ? state.targetDiscountRate * 100 : state.targetDiscountRate || 5);
 
   const step5Data = state.step5Data;
   const selectedFile = getSelectedFile(5);
@@ -33,8 +33,10 @@ export function Step5Panel() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           table7FileBase64: selectedFile.base64,
+          compareItems: state.step3Data || undefined,
           maxPriceTotal: localMaxPrice,
           targetDiscountRate: localDiscountRate / 100,
+          strategyRules: state.step4Data?.map((item) => ({ row: item.row, category: item.category, strategy: item.strategyLevel })),
         }),
       });
       const data = await res.json();
@@ -42,7 +44,7 @@ export function Step5Panel() {
         updateState({
           step5Data: data,
           maxPriceTotal: localMaxPrice,
-          targetDiscountRate: localDiscountRate,
+          targetDiscountRate: localDiscountRate / 100,
         });
       } else {
         setError(data.error || '配平失败');
@@ -52,7 +54,7 @@ export function Step5Panel() {
     } finally {
       setLoading(false);
     }
-  }, [selectedFile, localMaxPrice, localDiscountRate, updateState]);
+  }, [selectedFile, localMaxPrice, localDiscountRate, state.step3Data, state.step4Data, updateState]);
 
   const handleExport = useCallback(async () => {
     if (!step5Data?.level2?.items) return;

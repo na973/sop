@@ -20,15 +20,20 @@ export function FileSelector({ step, accept = '.xlsx,.xls', required = true, onF
   const inputRef = useRef<HTMLInputElement>(null);
 
   const selectedFile = getSelectedFile(step);
-  const excelFiles = state.fileLibrary.filter((f) => f.type === 'excel');
-  const pdfFiles = state.fileLibrary.filter((f) => f.type === 'pdf');
+  const allowedTypes = new Set([
+    accept.includes('.xls') ? 'excel' : '',
+    accept.includes('.pdf') ? 'pdf' : '',
+    accept.includes('.txt') ? 'text' : '',
+  ].filter(Boolean));
+  const selectableFiles = state.fileLibrary.filter((f) => allowedTypes.has(f.type));
 
   const handleFile = useCallback(
     (file: File) => {
       const reader = new FileReader();
       reader.onload = () => {
         const base64 = (reader.result as string).split(',')[1];
-        const type: 'excel' | 'pdf' = file.name.toLowerCase().endsWith('.pdf') ? 'pdf' : 'excel';
+        const lowerName = file.name.toLowerCase();
+        const type: FileEntry['type'] = lowerName.endsWith('.pdf') ? 'pdf' : lowerName.endsWith('.txt') ? 'text' : 'excel';
         const id = addFile({ name: file.name, base64, type });
         selectFile(step, id);
         const newEntry = { id, name: file.name, base64, type, uploadedAt: Date.now() };
@@ -58,7 +63,7 @@ export function FileSelector({ step, accept = '.xlsx,.xls', required = true, onF
     [selectFile, step, state.fileLibrary, onFileSelected],
   );
 
-  const acceptLabel = accept.includes('.pdf') ? 'Excel或PDF文件' : 'Excel文件';
+  const acceptLabel = accept.includes('.pdf') && accept.includes('.xls') ? 'Excel或PDF文件' : accept.includes('.pdf') ? 'PDF文件' : accept.includes('.txt') ? '文本文件' : 'Excel文件';
 
   return (
     <div className="space-y-3">
@@ -102,42 +107,20 @@ export function FileSelector({ step, accept = '.xlsx,.xls', required = true, onF
         <div>
           <div className="text-xs text-muted-foreground mb-1">从文件库选择：</div>
           <div className="flex flex-wrap gap-1.5">
-            {excelFiles.length > 0 && (
-              <>
-                {excelFiles.map((f) => (
-                  <button
-                    key={f.id}
-                    onClick={() => handleSelectExisting(f.id)}
-                    className={`text-xs px-2 py-1 rounded border transition-colors ${
-                      selectedFile?.id === f.id
-                        ? 'border-primary bg-primary/10 text-primary'
-                        : 'border-border hover:border-primary/50 text-muted-foreground hover:text-foreground'
-                    }`}
-                    title={f.name}
-                  >
-                    📊 {f.name.length > 20 ? f.name.slice(0, 17) + '...' : f.name}
-                  </button>
-                ))}
-              </>
-            )}
-            {accept.includes('.pdf') && pdfFiles.length > 0 && (
-              <>
-                {pdfFiles.map((f) => (
-                  <button
-                    key={f.id}
-                    onClick={() => handleSelectExisting(f.id)}
-                    className={`text-xs px-2 py-1 rounded border transition-colors ${
-                      selectedFile?.id === f.id
-                        ? 'border-primary bg-primary/10 text-primary'
-                        : 'border-border hover:border-primary/50 text-muted-foreground hover:text-foreground'
-                    }`}
-                    title={f.name}
-                  >
-                    📄 {f.name.length > 20 ? f.name.slice(0, 17) + '...' : f.name}
-                  </button>
-                ))}
-              </>
-            )}
+            {selectableFiles.map((f) => (
+              <button
+                key={f.id}
+                onClick={() => handleSelectExisting(f.id)}
+                className={`text-xs px-2 py-1 rounded border transition-colors ${
+                  selectedFile?.id === f.id
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border hover:border-primary/50 text-muted-foreground hover:text-foreground'
+                }`}
+                title={f.name}
+              >
+                {f.type === 'pdf' ? '📄' : f.type === 'text' ? '📃' : '📊'} {f.name.length > 20 ? f.name.slice(0, 17) + '...' : f.name}
+              </button>
+            ))}
           </div>
         </div>
       )}

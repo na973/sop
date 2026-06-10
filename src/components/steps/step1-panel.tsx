@@ -49,6 +49,9 @@ export function Step1Panel() {
           setLoading(false);
           return;
         }
+      } else if (selectedFile?.type === 'text') {
+        const bytes = Uint8Array.from(atob(selectedFile.base64), (char) => char.charCodeAt(0));
+        content = new TextDecoder('utf-8').decode(bytes);
       }
 
       // AI提取
