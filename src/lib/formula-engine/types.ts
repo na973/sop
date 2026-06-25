@@ -22,6 +22,8 @@ export interface CellData {
   value: CellValue;
   /** 公式文本（仅公式单元格有） */
   formula?: string;
+  /** Excel 文件中保存的公式缓存值，用于引擎暂不支持某个公式时安全回退 */
+  cachedValue?: CellValue;
 }
 
 /** Sheet数据：row/col 1-based */

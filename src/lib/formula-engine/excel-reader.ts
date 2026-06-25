@@ -37,11 +37,17 @@ export async function readExcelToWorkbook(buffer: ArrayBuffer): Promise<Workbook
           const formulaText = isFormulaCell
             ? (cell.formula || '')
             : (valueObj!.formula as string);
+          const cachedValue = normalizeExcelValue(
+            typeof cell.value === 'object' && cell.value !== null && 'result' in cell.value
+              ? (cell.value as { result?: unknown }).result
+              : undefined,
+          );
           cellData = {
             raw: formulaText,
             isFormula: true,
             formula: formulaText,
-            value: undefined as unknown as CellValue,
+            value: cachedValue,
+            cachedValue,
           };
           // ExcelJS的formula不含开头的=号，需要补上
           if (cellData.formula && !cellData.formula.startsWith('=')) {
@@ -52,26 +58,7 @@ export async function readExcelToWorkbook(buffer: ArrayBuffer): Promise<Workbook
           }
         } else {
           // 常量单元格
-          let value: CellValue = null;
-          if (cell.value !== null && cell.value !== undefined) {
-            if (typeof cell.value === 'object' && 'richText' in (cell.value as object)) {
-              // RichText -> string
-              value = (cell.value as { richText: Array<{ text: string }> }).richText
-                .map((r) => r.text)
-                .join('');
-            } else if (typeof cell.value === 'object' && 'result' in (cell.value as object)) {
-              // Formula result (shouldn't reach here but just in case)
-              value = (cell.value as { result: CellValue }).result;
-            } else if (
-              typeof cell.value === 'number' ||
-              typeof cell.value === 'string' ||
-              typeof cell.value === 'boolean'
-            ) {
-              value = cell.value;
-            } else {
-              value = String(cell.value);
-            }
-          }
+          const value = normalizeExcelValue(cell.value);
           cellData = {
             raw: value,
             isFormula: false,
@@ -87,6 +74,19 @@ export async function readExcelToWorkbook(buffer: ArrayBuffer): Promise<Workbook
   }
 
   return workbook;
+}
+
+function normalizeExcelValue(value: unknown): CellValue {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'number' || typeof value === 'string' || typeof value === 'boolean') return value;
+  if (value instanceof Error) return value;
+  if (typeof value === 'object' && 'richText' in value) {
+    return (value as { richText: Array<{ text: string }> }).richText.map((r) => r.text).join('');
+  }
+  if (typeof value === 'object' && 'result' in value) {
+    return normalizeExcelValue((value as { result?: unknown }).result);
+  }
+  return String(value);
 }
 
 /** 读取Excel文件并获取计算后的值（用于验证比对） */

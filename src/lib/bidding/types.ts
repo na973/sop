@@ -192,7 +192,7 @@ export interface ListBalanceResult {
   messages: string[];
 }
 
-/** 步骤6: 材料调价条目 */
+/** 步骤6: 工料机调价条目 */
 export interface MaterialAdjustItem {
   id: string;
   /** 工料机编码 */
@@ -213,7 +213,7 @@ export interface MaterialAdjustItem {
   affectedTotalPriceChange: number;
 }
 
-/** 步骤6: 材料调价配平结果 */
+/** 步骤6: 工料机调价配平结果 */
 export interface MaterialBalanceResult {
   /** 目标总价（来自步骤5） */
   targetTotalPrice: number;
@@ -223,7 +223,7 @@ export interface MaterialBalanceResult {
   afterTotalPrice: number;
   /** 与目标总价差额 */
   diffFromTarget: number;
-  /** 材料调价条目 */
+  /** 工料机调价条目 */
   items: MaterialAdjustItem[];
   /** 匹配清单数量 */
   matchedBidItemCount: number;
@@ -290,5 +290,3 @@ export const SCORING_RULES = {
   },
 };
 
-/** 单价甄别约束范围 */
-export const SCREENING_RANGE = { min: 0.455, max: 0.845 };

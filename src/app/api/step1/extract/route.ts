@@ -1,28 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { LLMClient, Config, HeaderUtils, Message } from 'coze-coding-dev-sdk';
 
+export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-/**
- * POST /api/step1/extract
- * AI提取招标文件商务条款
- * Body: { content: string }  招标文件文本内容
- */
-export async function POST(request: NextRequest) {
-  try {
-    const { content } = await request.json();
-    if (!content || typeof content !== 'string') {
-      return NextResponse.json(
-        { success: false, error: '请提供招标文件文本内容' },
-        { status: 400 }
-      );
-    }
-
-    const customHeaders = HeaderUtils.extractForwardHeaders(request.headers);
-    const config = new Config();
-    const client = new LLMClient(config, customHeaders);
-
-    const systemPrompt = `你是一位专业的工程造价咨询师，擅长从招标文件中提取商务条款信息。
+const SYSTEM_PROMPT = `你是一位专业的工程造价咨询师，擅长从招标文件中提取商务条款信息。
 请从提供的招标文件文本中，提取以下8大分类的商务条款信息，以JSON数组格式返回。
 
 每个条目包含以下字段：
@@ -45,42 +26,78 @@ export async function POST(request: NextRequest) {
 请确保提取的信息准确、完整，数值类信息保留原文表述。
 只返回JSON数组，不要其他内容。`;
 
-    const messages: Message[] = [
-      { role: 'system', content: systemPrompt },
-      {
-        role: 'user',
-        content: `请从以下招标文件中提取商务条款信息：\n\n${content}`,
-      },
-    ];
+/**
+ * POST /api/step1/extract
+ * AI提取招标文件商务条款
+ * Body: { content: string }  招标文件文本内容
+ */
+export async function POST(request: NextRequest) {
+  try {
+    const { content } = await request.json();
+    if (!content || typeof content !== 'string') {
+      return NextResponse.json({ success: false, error: '请提供招标文件文本内容' }, { status: 400 });
+    }
 
-    const response = await client.invoke(messages, {
-      model: 'doubao-seed-2-0-pro-260215',
-      temperature: 0.2,
+    const ai = getAiConfig();
+    if (!ai.apiKey) {
+      return NextResponse.json({
+        success: false,
+        configured: false,
+        error: '未配置 STEP4_AI_API_KEY。请在 .env.local 中配置 DeepSeek Key 后重启服务。',
+        expectedEnv: ['STEP4_AI_API_KEY', 'STEP4_AI_BASE_URL', 'STEP4_AI_MODEL'],
+      }, { status: 501 });
+    }
+
+    const response = await fetch(`${ai.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${ai.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: ai.model,
+        temperature: 0.2,
+        messages: [
+          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'user', content: `请从以下招标文件中提取商务条款信息：\n\n${content}` },
+        ],
+      }),
     });
 
-    // 尝试解析JSON
-    let extractedData: unknown[];
-    try {
-      const jsonMatch = response.content.match(/\[[\s\S]*\]/);
-      if (jsonMatch) {
-        extractedData = JSON.parse(jsonMatch[0]);
-      } else {
-        extractedData = [{ category: '提取结果', item: '原始输出', content: response.content, impact: '中', note: 'AI未能输出标准JSON格式' }];
-      }
-    } catch {
-      extractedData = [{ category: '提取结果', item: '原始输出', content: response.content, impact: '中', note: 'JSON解析失败' }];
+    const raw = await response.text();
+    if (!response.ok) {
+      return NextResponse.json({ success: false, error: `AI接口请求失败：${response.status}`, raw }, { status: 502 });
     }
+
+    const parsed = JSON.parse(raw) as { choices?: Array<{ message?: { content?: string } }> };
+    const aiContent = parsed.choices?.[0]?.message?.content || '';
+    const extractedData = parseExtractedData(aiContent);
 
     return NextResponse.json({
       success: true,
       data: extractedData,
-      raw: response.content,
+      raw: aiContent,
     });
   } catch (error) {
     console.error('Step1 extract error:', error);
-    return NextResponse.json(
-      { success: false, error: String(error) },
-      { status: 500 }
-    );
+    return NextResponse.json({ success: false, error: String(error) }, { status: 500 });
+  }
+}
+
+function getAiConfig() {
+  return {
+    apiKey: process.env.STEP4_AI_API_KEY,
+    baseUrl: (process.env.STEP4_AI_BASE_URL || 'https://api.deepseek.com/v1').replace(/\/$/, ''),
+    model: process.env.STEP4_AI_MODEL || 'deepseek-chat',
+  };
+}
+
+function parseExtractedData(content: string): unknown[] {
+  try {
+    const jsonMatch = content.match(/\[[\s\S]*\]/);
+    if (jsonMatch) return JSON.parse(jsonMatch[0]) as unknown[];
+    return [{ category: '提取结果', item: '原始输出', content, impact: '中', note: 'AI未能输出标准JSON格式' }];
+  } catch {
+    return [{ category: '提取结果', item: '原始输出', content, impact: '中', note: 'JSON解析失败' }];
   }
 }

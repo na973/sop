@@ -93,24 +93,30 @@ export function calculateWorkbook(workbook: WorkbookData): {
           const ast = parseFormula(cellData.formula);
           ctx.computing.clear(); // 每次计算前重置
           const result = evaluate(ast, ctx);
-          cellData.value = result;
-          ctx.cache.set(fullKey, result);
+          cellData.value = result instanceof Error && cellData.cachedValue !== undefined && cellData.cachedValue !== null
+            ? cellData.cachedValue
+            : result;
+          ctx.cache.set(fullKey, cellData.value);
           calculated++;
 
-          if (result instanceof Error) {
+          if (cellData.value instanceof Error) {
             errors.push({
               sheet: sheetName,
               cell: key,
-              error: String(result),
+              error: String(cellData.value),
             });
           }
         } catch (e) {
-          cellData.value = new FormulaCalcError(String(e));
-          errors.push({
-            sheet: sheetName,
-            cell: key,
-            error: String(e),
-          });
+          cellData.value = cellData.cachedValue !== undefined && cellData.cachedValue !== null
+            ? cellData.cachedValue
+            : new FormulaCalcError(String(e));
+          if (cellData.value instanceof Error) {
+            errors.push({
+              sheet: sheetName,
+              cell: key,
+              error: String(e),
+            });
+          }
           calculated++;
         }
       }

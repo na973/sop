@@ -121,3 +121,42 @@ body {
 .step-pending {
   color: #64748b;
 }
+
+/* 业务数据表格：按内容自适应列宽，长文本自动换行，行距更适合阅读 */
+main table:not([data-slot='table']) {
+  table-layout: auto;
+  border-collapse: collapse;
+}
+
+main table:not([data-slot='table']) th,
+main table:not([data-slot='table']) td {
+  vertical-align: top;
+  white-space: normal !important;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  line-height: 1.55;
+}
+
+main table:not([data-slot='table']) th {
+  min-width: 4.5rem;
+  max-width: 36rem;
+  resize: horizontal;
+  overflow: auto;
+  cursor: col-resize;
+  user-select: none;
+}
+
+main table:not([data-slot='table']) td {
+  min-width: 4.5rem;
+}
+
+main table:not([data-slot='table']) th:hover {
+  box-shadow: inset -2px 0 0 var(--ring);
+}
+
+main table:not([data-slot='table']) .font-mono,
+main table:not([data-slot='table']) .font-data {
+  white-space: normal !important;
+  word-break: normal;
+  overflow-wrap: anywhere;
+}

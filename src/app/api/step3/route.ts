@@ -15,6 +15,7 @@ interface BidItemInput {
   category: string;
   code: string;
   name: string;
+  feature?: string;
   unit: string;
   quantity: number;
   unitPrice: number;
@@ -26,6 +27,7 @@ interface LimitItem {
   category: string;
   code: string;
   name: string;
+  feature?: string;
   unit: string;
   quantity: number;
   maxUnitPrice: number;
@@ -33,11 +35,14 @@ interface LimitItem {
   source: 'pdf' | 'excel' | 'summary';
 }
 
+type LimitSummary = Record<string, number>;
+
 interface CompareItemResult {
   row: number;
   category: string;
   code: string;
   name: string;
+  feature?: string;
   unit: string;
   quantity: number;
   ourUnitPrice: number;
@@ -56,6 +61,8 @@ interface CompareItemResult {
   screeningRank?: number;
   screeningBasis?: string;
   isAbnormalBidItem?: boolean;
+  abnormalDeviationRate?: number;
+  totalDeviationRate?: number;
 }
 
 function toNum(v: unknown): number {
@@ -145,6 +152,7 @@ function parseLimitBillExcel(fileBase64: string): LimitItem[] {
       const serial = toNum(row[0]);
       const code = normalizeCode(String(row[1] ?? ''));
       const name = String(row[2] ?? '').trim();
+      const feature = String(row[3] ?? '').trim();
       const unit = String(row[5] ?? '').trim();
       const quantity = toNum(row[6]);
       const maxUnitPrice = toNum(row[7]);
@@ -156,6 +164,7 @@ function parseLimitBillExcel(fileBase64: string): LimitItem[] {
           category,
           code,
           name,
+          feature,
           unit,
           quantity,
           maxUnitPrice: maxUnitPrice > 0 ? maxUnitPrice : maxTotalPrice / quantity,
@@ -185,6 +194,94 @@ function extractLimitTotalFromText(text: string): number {
   }
 
   return 0;
+}
+
+function extractLimitSummaryFromText(text: string): LimitSummary {
+  const normalized = normalizePdfText(text);
+  const summary = extractLimitSummaryTable(normalized);
+  const labels = [
+    '建设项目分部分项工程项目费',
+    '单项工程',
+    '道路工程',
+    '桥梁工程',
+    '排水工程',
+    '措施项目费',
+    '其中：安全文明施工费',
+    '安全文明施工费',
+    '其他措施项目费',
+    '其他项目费',
+    '暂列金额',
+    '专业工程暂估价（含税）',
+    '计日工',
+    '总承包服务费',
+    '增值税',
+    '合计=1+2+3+4',
+    '合计',
+  ];
+
+  for (const label of labels) {
+    if (summary[label] !== undefined) continue;
+    const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const pattern = new RegExp(`${escaped}[\\s\\S]{0,80}?([0-9][0-9,]*(?:\\.[0-9]+)?)`);
+    const match = normalized.match(pattern);
+    const amount = toNum(match?.[1]);
+    if (amount > 0) summary[label] = amount;
+  }
+
+  return summary;
+}
+
+function extractLimitSummaryTable(normalizedText: string): LimitSummary {
+  const summary: LimitSummary = {};
+  const summaryStart = normalizedText.indexOf('汇总表');
+  if (summaryStart < 0) return summary;
+
+  const nextTableCandidates = [
+    normalizedText.indexOf('措施项目清单汇总表', summaryStart + 3),
+    normalizedText.indexOf('分部分项工程量清单', summaryStart + 3),
+    normalizedText.indexOf('-- 5 of', summaryStart + 3),
+  ].filter((index) => index > summaryStart);
+  const summaryEnd = nextTableCandidates.length ? Math.min(...nextTableCandidates) : summaryStart + 3000;
+  const region = normalizedText.slice(summaryStart, summaryEnd);
+  const lines = region.split('\n').map((line) => line.trim()).filter(Boolean);
+  const codeToLabel: Record<string, string> = {
+    '1': '建设项目分部分项工程项目费',
+    '1.1': '单项工程',
+    '2': '措施项目费',
+    '2.1': '其中：安全文明施工费',
+    '2.2': '其他措施项目费',
+    '3': '其他项目费',
+    '3.1': '暂列金额',
+    '3.2': '专业工程暂估价（含税）',
+    '3.3': '计日工',
+    '3.4': '总承包服务费',
+    '4': '增值税',
+  };
+
+  for (const line of lines) {
+    const normalizedLine = line.replace(/[ \t]+/g, ' ');
+    const rowMatch = normalizedLine.match(/^(\d+(?:\.\d+)*)\s+(.+?)\s+([0-9][0-9,]*(?:\.[0-9]+)?)$/);
+    if (!rowMatch) continue;
+
+    const code = rowMatch[1];
+    const rawLabel = normalizeText(rowMatch[2]);
+    const amount = toNum(rowMatch[3]);
+    if (amount <= 0 && !['3.3'].includes(code)) continue;
+
+    const label = codeToLabel[code] ?? rawLabel;
+    summary[label] = amount;
+    if (code === '2.1') summary['安全文明施工费'] = amount;
+  }
+
+  const totalMatch = region.match(/合计\s*=\s*1\s*\+\s*2\s*\+\s*3\s*\+\s*4\s*([0-9][0-9,]*(?:\.[0-9]+)?)/)
+    || region.match(/合\s*计\s*([0-9][0-9,]*(?:\.[0-9]+)?)/);
+  const total = toNum(totalMatch?.[1]);
+  if (total > 0) {
+    summary['合计=1+2+3+4'] = total;
+    summary.合计 = total;
+  }
+
+  return summary;
 }
 
 function nearlyEqual(a: number, b: number, toleranceRate = 0.01): boolean {
@@ -308,7 +405,7 @@ function parseLimitPdfItems(text: string): LimitItem[] {
   return items;
 }
 
-async function parseLimitPdf(fileBase64: string, hints: LimitItem[] = []): Promise<{ total: number; items: LimitItem[] }> {
+async function parseLimitPdf(fileBase64: string, hints: LimitItem[] = []): Promise<{ total: number; items: LimitItem[]; summary: LimitSummary }> {
   const buffer = Buffer.from(fileBase64, 'base64');
   PDFParse.setWorker(pathToFileURL(getPdfWorkerPath()).href);
   const parser = new PDFParse({ data: new Uint8Array(buffer) });
@@ -320,6 +417,7 @@ async function parseLimitPdf(fileBase64: string, hints: LimitItem[] = []): Promi
     return {
       total: extractLimitTotalFromText(text),
       items: hintedItems.length > 0 ? hintedItems : parseLimitPdfItems(text),
+      summary: extractLimitSummaryFromText(text),
     };
   } finally {
     await parser.destroy();
@@ -342,8 +440,15 @@ function buildSummaryLimitItems(bidItems: BidItemInput[], maxPriceTotal: number)
   }));
 }
 
-function getScreeningCount(totalItems: number): number {
-  return Math.max(1, Math.ceil(totalItems * 0.3));
+function normalizeRatio(value: unknown, fallback: number): number {
+  const num = toNum(value);
+  if (num <= 0) return fallback;
+  return num > 1 ? num / 100 : num;
+}
+
+function getScreeningCount(totalItems: number, screeningRatio: number): number {
+  if (totalItems <= 0) return 0;
+  return Math.max(1, Math.ceil(totalItems * screeningRatio));
 }
 
 function applyBidReviewScreening<T extends {
@@ -353,7 +458,7 @@ function applyBidReviewScreening<T extends {
   quantity: number;
   ourUnitPrice: number;
   isScreeningItem: boolean;
-}>(items: T[]): T[] {
+}>(items: T[], screeningRatio = 0.3, abnormalDeviationRatio = 0.3): T[] {
   const sorted = [...items]
     .map((item, index) => ({
       item,
@@ -361,7 +466,7 @@ function applyBidReviewScreening<T extends {
       itemReviewPrice: item.maxTotalPrice > 0 ? item.maxTotalPrice : item.maxUnitPrice * item.quantity,
     }))
     .sort((a, b) => b.itemReviewPrice - a.itemReviewPrice);
-  const screeningCount = getScreeningCount(items.length);
+  const screeningCount = getScreeningCount(items.length, screeningRatio);
   const screeningIndexByCode = new Map(sorted.slice(0, screeningCount).map((entry, index) => [normalizeCode(entry.item.code), index + 1]));
 
   return items.map((item) => {
@@ -376,7 +481,8 @@ function applyBidReviewScreening<T extends {
       screeningBasis: screeningRank
         ? `按评标规则B项：子目评审价排序前30%（第${screeningRank}/${items.length}项）`
         : '未进入子目评审价排序前30%',
-      isAbnormalBidItem: Boolean(screeningRank && relativeDeviation > 0.3),
+      isAbnormalBidItem: Boolean(screeningRank && relativeDeviation > abnormalDeviationRatio),
+      abnormalDeviationRate: relativeDeviation,
       isScreeningItem: Boolean(screeningRank),
     };
   });
@@ -391,13 +497,19 @@ export async function POST(request: NextRequest) {
       limitBillFileBase64,
       limitPdfBase64,
       maxPriceTotal: inputMaxPriceTotal,
+      screeningRatio: inputScreeningRatio,
+      abnormalDeviationRatio: inputAbnormalDeviationRatio,
     } = body as {
       bidItems?: BidItemInput[];
       table7FileBase64?: string;
       limitBillFileBase64?: string;
       limitPdfBase64?: string;
       maxPriceTotal?: number;
+      screeningRatio?: number;
+      abnormalDeviationRatio?: number;
     };
+    const screeningRatio = normalizeRatio(inputScreeningRatio, 0.3);
+    const abnormalDeviationRatio = normalizeRatio(inputAbnormalDeviationRatio, 0.3);
 
     const bidItems = inputBidItems?.length
       ? inputBidItems
@@ -410,6 +522,7 @@ export async function POST(request: NextRequest) {
     }
 
     let maxPriceTotal = inputMaxPriceTotal || 0;
+    let limitSummary: LimitSummary = {};
     const limitByCode = new Map<string, LimitItem>();
     const limitBillItems = limitBillFileBase64 ? parseLimitBillExcel(limitBillFileBase64) : [];
 
@@ -420,6 +533,7 @@ export async function POST(request: NextRequest) {
     if (limitPdfBase64) {
       const limitPdf = await parseLimitPdf(limitPdfBase64, limitBillItems);
       if (limitPdf.total > 0) maxPriceTotal = limitPdf.total;
+      limitSummary = limitPdf.summary;
       for (const item of limitPdf.items) {
         // PDF contains the real control comprehensive unit price, so it wins over table 3.
         limitByCode.set(normalizeCode(item.code), item);
@@ -453,6 +567,7 @@ export async function POST(request: NextRequest) {
           category: our.category,
           code: normalizeCode(our.code),
           name: our.name,
+          feature: our.feature,
           unit: our.unit || '',
           quantity: toNum(our.quantity),
           ourUnitPrice,
@@ -472,11 +587,13 @@ export async function POST(request: NextRequest) {
       }
 
       const deviationRate = ourUnitPrice > 0 ? (limit.maxUnitPrice - ourUnitPrice) / ourUnitPrice : 0;
+      const totalDeviationRate = ourTotalPrice > 0 ? (limit.maxTotalPrice - ourTotalPrice) / ourTotalPrice : 0;
       compareItems.push({
         row: our.row,
         category: our.category || limit.category,
         code: normalizeCode(our.code),
         name: our.name,
+        feature: limit.feature || our.feature,
         unit: our.unit || limit.unit,
         quantity: toNum(our.quantity),
         ourUnitPrice,
@@ -489,6 +606,7 @@ export async function POST(request: NextRequest) {
         quantityDiff: toNum(our.quantity) - limit.quantity,
         nameMatched: normalizeText(our.name) === normalizeText(limit.name),
         deviationRate,
+        totalDeviationRate,
         deviationLevel: getDeviationLevel(deviationRate),
         isScreeningItem: Math.abs(deviationRate) >= 0.15,
       });
@@ -499,7 +617,7 @@ export async function POST(request: NextRequest) {
       .filter((item) => !ourCodes.has(normalizeCode(item.code)))
       .map((item) => `${item.category} ${item.code} ${item.name}`);
 
-    const screenedCompareItems = applyBidReviewScreening(compareItems);
+    const screenedCompareItems = applyBidReviewScreening(compareItems, screeningRatio, abnormalDeviationRatio);
 
     return NextResponse.json({
       success: true,
@@ -513,11 +631,14 @@ export async function POST(request: NextRequest) {
         summaryItems: screenedCompareItems.filter((item) => item.limitPriceSource === 'summary').length,
         unmatchedOurCount: unmatchedOurItems.length,
         unmatchedLimitCount: unmatchedLimitItems.length,
-        screeningRule: '评标规则B项：子目评审价排序前30%，相对偏差绝对值>30%为异常报价项',
+        screeningRatio,
+        abnormalDeviationRatio,
+        screeningRule: `评标规则B项：子目评审价排序前${Math.round(screeningRatio * 100)}%，相对偏差绝对值>${Math.round(abnormalDeviationRatio * 100)}%为异常报价项`,
         screeningItems: screenedCompareItems.filter((item) => item.isScreeningItem).length,
         abnormalBidItems: screenedCompareItems.filter((item) => item.isAbnormalBidItem).length,
       },
       maxPriceTotal,
+      limitSummary,
       unmatchedOurItems,
       unmatchedLimitItems,
     });

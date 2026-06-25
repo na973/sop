@@ -25,7 +25,7 @@ export function Step7Panel() {
       return;
     }
     if (!step6Data?.level3?.priceChanges?.length) {
-      setError('请先在步骤6中执行材料调价配平，生成priceChanges');
+      setError('请先在步骤6中执行工料机调价配平，生成priceChanges');
       return;
     }
     setLoading(true);
@@ -73,7 +73,7 @@ export function Step7Panel() {
       <div className="border border-border rounded p-4 space-y-3">
         <h3 className="text-sm font-medium">导出说明</h3>
         <ul className="text-xs text-muted-foreground space-y-1 list-disc pl-4">
-          <li>将步骤5的清单配平结果和步骤6的材料调价结果写回Excel</li>
+          <li>将步骤5的清单配平结果和步骤6的工料机调价结果写回Excel</li>
           <li>修改工料机汇总表F列价格 → 公式引擎重算所有Sheet</li>
           <li>生成新的Excel文件供下载</li>
         </ul>

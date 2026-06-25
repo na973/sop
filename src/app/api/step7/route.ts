@@ -34,14 +34,14 @@ export async function POST(request: NextRequest) {
         row: number; category: string; code: string; name: string;
         quantity: number; targetUnitPrice: number; targetTotalPrice: number;
       }>;
-      priceChanges?: Array<{ code: string; adjustedPrice: number }>;
+      priceChanges?: Array<{ row?: number; code: string; adjustedPrice: number; priceCol?: number }>;
     };
 
     if (!balancedItems?.length) {
       return NextResponse.json({ success: false, error: '请提供：balancedItems(配平结果)' }, { status: 400 });
     }
     if (!priceChanges?.length) {
-      return NextResponse.json({ success: false, error: '请先完成步骤6材料调价并提供priceChanges' }, { status: 400 });
+      return NextResponse.json({ success: false, error: '请先完成步骤6工料机调价并提供priceChanges' }, { status: 400 });
     }
 
     // 1. 读取原始Excel
@@ -61,7 +61,7 @@ export async function POST(request: NextRequest) {
     const workbook = await readExcelToWorkbook(arrayBuffer);
     const currentWb = cloneWorkbook(workbook);
 
-    // 4. 应用步骤6计算出的逐项材料价格调整
+    // 4. 应用步骤6计算出的逐项工料机价格调整
     applyPriceChanges(currentWb, priceChanges);
 
     // 5. 重新计算
@@ -95,20 +95,27 @@ export async function POST(request: NextRequest) {
 
 function applyPriceChanges(
   workbook: WorkbookData,
-  priceChanges: Array<{ code: string; adjustedPrice: number }>,
+  priceChanges: Array<{ row?: number; code: string; adjustedPrice: number; priceCol?: number }>,
 ) {
   const resSheet = workbook.get('工料机汇总表');
   if (!resSheet) return;
 
-  const priceByCode = new Map(priceChanges.map((change) => [change.code, change.adjustedPrice]));
+  for (const change of priceChanges) {
+    if (change.row && change.priceCol) {
+      const cell = resSheet.get(`${change.row},${change.priceCol}`);
+      if (cell) cell.value = change.adjustedPrice;
+    }
+  }
+
+  const priceByCode = new Map(priceChanges.map((change) => [change.code, change]));
   for (const [key, cellData] of resSheet) {
     const [r, c] = key.split(',').map(Number);
-    if (c !== 6 || r <= 1) continue;
+    if (r <= 1) continue;
 
     const code = String(resSheet.get(`${r},2`)?.value ?? '').trim();
-    const adjustedPrice = priceByCode.get(code);
-    if (adjustedPrice !== undefined) {
-      cellData.value = adjustedPrice;
+    const change = priceByCode.get(code);
+    if (change && c === (change.priceCol ?? 6)) {
+      cellData.value = change.adjustedPrice;
     }
   }
 }

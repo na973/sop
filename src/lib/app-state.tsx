@@ -26,6 +26,7 @@ export interface BidItem {
   category: string;
   code: string;
   name: string;
+  feature?: string;
   unit: string;
   quantity: number;
   unitPrice: number;
@@ -51,7 +52,11 @@ export interface ResourceSummaryItem {
   name: string;
   unit: string;
   quantity: number;
+  taxInclusivePrice: number;
+  taxRate: number;
+  /** 不含税单价 */
   price: number;
+  /** 数量 × 不含税单价 */
   totalPrice: number;
 }
 
@@ -59,6 +64,8 @@ export interface ResourceSummaryItem {
 export interface Step2Data {
   stats: { totalFormulas: number; calculated: number; errorCount: number; firstErrors: Array<{ sheet: string; cell: string; error: string }> };
   summary: Record<string, number>;
+  /** 安全文明施工项目清单明细表中的费率，百分数口径，如2.5表示2.5% */
+  safetyCivilizedRatePercent?: number;
   bidItems: BidItem[];
   resourceSummary: ResourceSummaryItem[];
 }
@@ -69,6 +76,7 @@ export interface PriceCompareItem {
   category: string;
   code: string;
   name: string;
+  feature?: string;
   unit: string;
   quantity: number;
   ourUnitPrice: number;
@@ -80,6 +88,8 @@ export interface PriceCompareItem {
   screeningRank?: number;
   screeningBasis?: string;
   isAbnormalBidItem?: boolean;
+  abnormalDeviationRate?: number;
+  totalDeviationRate?: number;
   limitQuantity?: number;
   limitName?: string;
   quantityDiff?: number;
@@ -95,27 +105,31 @@ export interface StrategyItem {
   category: string;
   code: string;
   name: string;
+  feature?: string;
   unit: string;
   quantity: number;
   maxUnitPrice: number;
   maxTotalPrice?: number;
   ourUnitPrice: number;
+  deviationRate: number;
   deviationLevel: string;
   isScreeningItem: boolean;
   itemReviewPrice?: number;
   screeningRank?: number;
   screeningBasis?: string;
   isAbnormalBidItem?: boolean;
-  quantityForecast: string;
-  optimization: string;
-  quantityScore?: number;
-  optimizationScore?: number;
-  deviationScore?: number;
-  totalScore: number;
+  quantityForecast?: string;
+  optimization?: string;
+  projectMajorType?: string;
+  projectSubType?: string;
+  checklistStep?: string;
+  profitOpportunity?: string;
+  reviewStatus?: string;
   strategyLevel: string;
   discountRange?: [number, number];
   coefficientRange: [number, number];
   suggestion: string;
+  reason?: string;
 }
 
 /** 步骤5配平条目 */
@@ -128,34 +142,109 @@ export interface BalancedItem {
   unitPrice: number;
   totalPrice: number;
   maxUnitPrice: number;
+  isScreeningItem?: boolean;
   strategy: string;
+  targetPriceRatio?: number;
+  targetPriceRatioRange?: [number, number];
   priceRatio: number;
   targetUnitPrice: number;
   targetTotalPrice: number;
 }
 
-/** 步骤6材料调价条目 */
+/** 步骤6工料机调价条目 */
 export interface PriceChange {
   row: number;
+  priceCol?: number;
   code: string;
   name: string;
   originalPrice: number;
   adjustedPrice: number;
   diff: number;
   diffPercent?: number;
+  fixed?: boolean;
+  isAdjustable?: boolean;
+  reviewReason?: string;
+}
+
+export interface AdjustedBidItem {
+  row: number;
+  category: string;
+  code: string;
+  name: string;
+  isScreeningItem?: boolean;
+  quantity: number;
+  maxUnitPrice: number;
+  maxTotalPrice: number;
+  targetUnitPrice: number;
+  targetTotalPrice: number;
+  adjustedUnitPrice: number;
+  adjustedTotalPrice: number;
+  discountRate: number;
+  minAllowedUnitPrice?: number;
+  maxAllowedUnitPrice?: number;
+  targetDiscountRateRange?: [number, number];
+  rangeCompliant?: boolean;
+  rangeViolation?: { direction: 'low' | 'high' | 'none'; amount: number };
+  unitPriceDiff?: number;
+  totalPriceDiff?: number;
 }
 
 /** 步骤5结果 */
 export interface Step5Data {
   level1: { maxPriceTotal: number; targetTotal: number; totalDiscount: number; discountRate: number; pass: boolean };
   level2: { totalItems: number; targetTotal: number; actualTotal: number; items: BalancedItem[] };
-  validation: { totalDiff: number; totalDiffRate: number; totalPass: boolean; coefficientViolationCount: number; coefficientPass: boolean; overallPass: boolean };
+  validation: {
+    totalDiff: number;
+    totalDiffRate: number;
+    totalPass: boolean;
+    coefficientRange: { min: number; max: number };
+    predictedAverageDiscountRate: number;
+    predictedEquivalentListDiscountRate: number;
+    coefficientViolationCount: number;
+    coefficientPass: boolean;
+    overallPass: boolean;
+  };
 }
 
 /** 步骤6结果 */
 export interface Step6Data {
-  level3: { adjustableResourceCount: number; priceChanges: PriceChange[]; baseTotal: number; iterationLog: Array<{ iteration: number; totalDiff: number; adjustedCount: number }>; method: string };
-  validation: { targetTotal: number; actualTotal: number; diff: number; pass: boolean; iterations: number; converged: boolean; bestScaleFactor?: number };
+  level3: {
+    adjustableResourceCount: number;
+    priceChanges: PriceChange[];
+    adjustedItems: AdjustedBidItem[];
+    baseTotal: number;
+    baseProjectTotal?: number;
+    iterationLog: Array<{ iteration: number; totalDiff: number; adjustedCount: number }>;
+    itemAdjustmentLog?: unknown[];
+    itemDiagnostics?: unknown[];
+    rowMappingLog?: unknown[];
+    resourceWarnings?: unknown[];
+    sharedResources?: unknown[];
+    conflictResources?: unknown[];
+    manualReviewResources?: unknown[];
+    formulaWorkbookStats?: unknown;
+    method: string;
+  };
+  validation: {
+    targetTotal: number;
+    actualTotal: number;
+    diff: number;
+    pass: boolean;
+    iterations: number;
+    converged: boolean;
+    bestScaleFactor?: number;
+    targetType?: string;
+    targetProjectTotal?: number;
+    projectTotal?: number;
+    projectDiff?: number;
+    tolerance?: number;
+    baseProjectTotal?: number;
+    itemTotalAbsDiff?: number;
+    rangeCompliantCount?: number;
+    rangeViolationCount?: number;
+    rangeViolationAmount?: number;
+    selectedReason?: string;
+  };
   finalSummary: SummaryRow[] | null;
 }
 
@@ -174,6 +263,7 @@ export interface AppState {
   step1Data: Step1Data | null;
   step2Data: Step2Data | null;
   step3Data: PriceCompareItem[] | null;
+  step3LimitSummary: Record<string, number> | null;
   step4Data: StrategyItem[] | null;
   step5Data: Step5Data | null;
   step6Data: Step6Data | null;
@@ -184,6 +274,8 @@ export interface AppState {
   maxPriceTotal: number;
   /** 总下浮率（用户输入，如0.05表示5%） */
   targetDiscountRate: number;
+  /** 人工预测所有投标单位平均下浮率（用于评标单价约束） */
+  predictedAverageDiscountRate: number;
 }
 
 const initialState: AppState = {
@@ -193,6 +285,7 @@ const initialState: AppState = {
   step1Data: null,
   step2Data: null,
   step3Data: null,
+  step3LimitSummary: null,
   step4Data: null,
   step5Data: null,
   step6Data: null,
@@ -201,6 +294,7 @@ const initialState: AppState = {
 
   maxPriceTotal: 0,
   targetDiscountRate: 0.05,
+  predictedAverageDiscountRate: 0.05,
 };
 
 /* ──────── Context ──────── */

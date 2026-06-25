@@ -26,8 +26,18 @@ export function Step8Panel() {
     if (step4Data) {
       sheets.push({
         name: '报价策略',
-        headers: ['编码', '名称', '偏差等级', '评分', '策略', '系数范围'],
-        rows: step4Data.map((it) => [it.code, it.name, it.deviationLevel, it.totalScore, it.strategyLevel, `${it.coefficientRange[0]}~${it.coefficientRange[1]}`]),
+        headers: ['编码', '名称', '工程大类', '工程子类', '清单步骤', '偏差等级', '策略', '复核状态', '系数范围'],
+        rows: step4Data.map((it) => [
+          it.code,
+          it.name,
+          it.projectMajorType || '',
+          it.projectSubType || '',
+          it.checklistStep || '',
+          it.deviationLevel,
+          it.strategyLevel,
+          it.reviewStatus || '',
+          `${it.coefficientRange[0]}~${it.coefficientRange[1]}`,
+        ]),
       });
     }
     if (step5Data?.level2?.items) {
@@ -39,7 +49,7 @@ export function Step8Panel() {
     }
     if (step6Data?.level3?.priceChanges) {
       sheets.push({
-        name: '材料调价',
+        name: '工料机调价',
         headers: ['编码', '名称', '原价', '调后价', '比例'],
         rows: step6Data.level3.priceChanges.map((c) => [c.code, c.name, c.originalPrice, c.adjustedPrice, `${((c.diffPercent ?? 0) * 100).toFixed(1)}%`]),
       });
@@ -91,7 +101,7 @@ export function Step8Panel() {
             )}
             {step6Data?.validation?.actualTotal && (
               <div className="flex justify-between">
-                <span className="text-muted-foreground">材料调价后总价</span>
+                <span className="text-muted-foreground">工料机调价后总价</span>
                 <span className="font-mono">{fmt(step6Data.validation.actualTotal)}</span>
               </div>
             )}
@@ -154,14 +164,15 @@ export function Step8Panel() {
           <div className="space-y-1 text-xs">
             {(() => {
               const items = step5Data.level2.items;
+              const range = step5Data.validation?.coefficientRange ?? { min: 0, max: 1 };
               const violations = items.filter((it) => {
                 const ratio = it.targetUnitPrice && it.maxUnitPrice ? it.targetUnitPrice / it.maxUnitPrice : 0;
-                return ratio < 0.455 || ratio > 0.845;
+                return ratio < range.min || ratio > range.max;
               });
               return (
                 <>
                   <div className="flex justify-between">
-                    <span>0.455≤清单系数≤0.845</span>
+                    <span>动态清单系数：{range.min.toFixed(4)}~{range.max.toFixed(4)}</span>
                     <span className={violations.length === 0 ? 'text-green-600 font-bold' : 'text-red-600 font-bold'}>
                       {violations.length === 0 ? '通过' : `${violations.length}项超限`}
                     </span>

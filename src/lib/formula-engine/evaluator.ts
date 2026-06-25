@@ -43,8 +43,18 @@ function toNumber(v: CellValue): number {
   if (typeof v === 'number') return v;
   if (typeof v === 'boolean') return v ? 1 : 0;
   if (isError(v)) return NaN;
-  const n = Number(v);
-  return isNaN(n) ? NaN : n;
+  return parseExcelNumber(v);
+}
+
+function parseExcelNumber(value: string): number {
+  const normalized = String(value).replace(/,/g, '').trim();
+  if (!normalized) return 0;
+  if (normalized.endsWith('%')) {
+    const percent = Number(normalized.slice(0, -1));
+    return Number.isFinite(percent) ? percent / 100 : NaN;
+  }
+  const n = Number(normalized);
+  return Number.isFinite(n) ? n : NaN;
 }
 
 /** 转字符串 */
@@ -194,8 +204,13 @@ function resolveCellRef(ctx: FormulaContext, row: number, col: number): CellValu
     try {
       const ast = parseFormula(cell.formula!);
       cell.value = evaluate(ast, ctx);
+      if (isError(cell.value) && cell.cachedValue !== undefined && cell.cachedValue !== null) {
+        cell.value = cell.cachedValue;
+      }
     } catch (e) {
-      cell.value = new FormulaError('ERROR', String(e));
+      cell.value = cell.cachedValue !== undefined && cell.cachedValue !== null
+        ? cell.cachedValue
+        : new FormulaError('ERROR', String(e));
     }
     ctx.computing.delete(fullKey);
     ctx.cache.set(fullKey, cell.value);
@@ -239,8 +254,13 @@ function resolveCrossSheetCell(ctx: FormulaContext, sheetName: string, row: numb
     try {
       const ast = parseFormula(cell.formula!);
       cell.value = evaluate(ast, ctx);
+      if (isError(cell.value) && cell.cachedValue !== undefined && cell.cachedValue !== null) {
+        cell.value = cell.cachedValue;
+      }
     } catch (e) {
-      cell.value = new FormulaError('ERROR', String(e));
+      cell.value = cell.cachedValue !== undefined && cell.cachedValue !== null
+        ? cell.cachedValue
+        : new FormulaError('ERROR', String(e));
     }
     ctx.currentSheet = oldSheet;
     ctx.computing.delete(fullKey);
@@ -852,7 +872,7 @@ function fnAverage(args: ASTNode[], ctx: FormulaContext): CellValue {
 function fnValue(args: ASTNode[], ctx: FormulaContext): CellValue {
   if (args.length < 1) return VALUE_ERROR;
   const text = toString(evaluate(args[0], ctx));
-  const n = Number(text);
+  const n = parseExcelNumber(text);
   return isNaN(n) ? VALUE_ERROR : n;
 }
 
@@ -919,7 +939,7 @@ function matchesCriteria(cellVal: CellValue, criteria: CellValue): boolean {
     const op = opMatch[1];
     const val = opMatch[2];
     const cellNum = toNumber(cellVal);
-    const critNum = Number(val);
+    const critNum = parseExcelNumber(val);
     if (!isNaN(critNum) && !isNaN(cellNum)) {
       switch (op) {
         case '>': return cellNum > critNum;
