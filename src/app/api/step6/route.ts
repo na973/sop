@@ -57,6 +57,11 @@ type LockedPriceChange = {
   fixed?: boolean;
 };
 
+type FixedPriceOverride = {
+  adjustedPrice: number;
+  fixed: boolean;
+};
+
 type ResourceContribution = {
   resourceCode: string;
   itemKey: string;
@@ -101,7 +106,7 @@ const RESOURCE_DELTA_LIMIT = 0.6;
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { table7FileBase64, fileBase64, balancedItems, targetProjectTotal, tolerance = 500, lockedPriceChanges = [] } = body as {
+    const { table7FileBase64, fileBase64, balancedItems, targetProjectTotal, tolerance = 200, lockedPriceChanges = [] } = body as {
       table7FileBase64?: string;
       fileBase64?: string;
       balancedItems?: BalancedInputItem[];
@@ -171,8 +176,8 @@ async function materialLevelPricing(
 
   // 3. 构建工料机资源列表（人工、材料、机械均可调价）
   const adjustableResources = extractAdjustableResources(resourceSheet);
-  const fixedPriceByCode = buildFixedPriceMap(lockedPriceChanges);
-  applyFixedPricesToResources(adjustableResources, fixedPriceByCode);
+  const fixedOverrides = buildFixedOverrideMap(lockedPriceChanges);
+  applyFixedPriceOverrides(adjustableResources, fixedOverrides);
   const adjustableCount = adjustableResources.filter(r => r.isAdjustable).length;
   if (adjustableCount === 0) {
     return { success: false, error: '没有可调价的工料机资源' };
@@ -335,7 +340,7 @@ async function materialLevelPricing(
       bestCalcWb = trialCalcWb;
       bestMetrics = metrics;
     }
-    if (metrics.projectAbsDiff <= tolerance) break;
+    if (isProjectWithinTargetWindow(metrics, tolerance)) break;
 
     const residualDeltas = buildProjectTotalCorrectionDeltas(
       metrics,
@@ -373,7 +378,7 @@ async function materialLevelPricing(
   const itemDiagnostics = buildItemDiagnostics(bestCalcWb, resolvedBalancedItems, itemResourceMap, resourceByCode);
 
   // 11. 校验结果
-  const converged = Math.abs(finalDiff) <= tolerance;
+  const converged = finalDiff <= 0 && Math.abs(finalDiff) <= tolerance;
   const validation = {
     targetTotal: round2(targetListTotal),
     actualTotal: round2(finalListTotal),
@@ -387,6 +392,7 @@ async function materialLevelPricing(
     projectTotal: round2(finalProjectTotal),
     projectDiff: round2(finalProjectDiff),
     tolerance: round2(tolerance),
+    toleranceRule: `调整后完整总价不高于目标总价，且低于目标总价不超过${round2(tolerance)}元`,
     baseProjectTotal: round2(baseProjectTotal),
     formulaErrors: 0,
     itemTotalAbsDiff: round2(finalMetrics.itemTotalAbsDiff),
@@ -538,11 +544,17 @@ function getPlanMetrics(
 }
 
 function isBetterPlan(candidate: PlanMetrics, current: PlanMetrics, tolerance: number): boolean {
-  const candidateInTolerance = candidate.projectAbsDiff <= tolerance;
-  const currentInTolerance = current.projectAbsDiff <= tolerance;
+  const candidateInTolerance = isProjectWithinTargetWindow(candidate, tolerance);
+  const currentInTolerance = isProjectWithinTargetWindow(current, tolerance);
 
   if (candidateInTolerance !== currentInTolerance) return candidateInTolerance;
-  if (!candidateInTolerance && !currentInTolerance) return candidate.projectAbsDiff < current.projectAbsDiff;
+  if (!candidateInTolerance && !currentInTolerance) {
+    const candidateDistance = getTargetWindowDistance(candidate, tolerance);
+    const currentDistance = getTargetWindowDistance(current, tolerance);
+    if (Math.abs(candidateDistance - currentDistance) > 0.01) return candidateDistance < currentDistance;
+    if ((candidate.projectDiff <= 0) !== (current.projectDiff <= 0)) return candidate.projectDiff <= 0;
+    return candidate.projectAbsDiff < current.projectAbsDiff;
+  }
   if (candidate.rangeCompliantCount !== current.rangeCompliantCount) return candidate.rangeCompliantCount > current.rangeCompliantCount;
   if (Math.abs(candidate.rangeViolationAmount - current.rangeViolationAmount) > 0.01) {
     return candidate.rangeViolationAmount < current.rangeViolationAmount;
@@ -551,6 +563,17 @@ function isBetterPlan(candidate: PlanMetrics, current: PlanMetrics, tolerance: n
     return candidate.itemTotalAbsDiff < current.itemTotalAbsDiff;
   }
   return candidate.projectAbsDiff < current.projectAbsDiff;
+}
+
+function isProjectWithinTargetWindow(metrics: Pick<PlanMetrics, 'projectDiff'>, tolerance: number): boolean {
+  return metrics.projectDiff <= 0 && Math.abs(metrics.projectDiff) <= Math.abs(tolerance);
+}
+
+function getTargetWindowDistance(metrics: Pick<PlanMetrics, 'projectDiff'>, tolerance: number): number {
+  const allowedUnder = Math.abs(tolerance);
+  if (isProjectWithinTargetWindow(metrics, allowedUnder)) return 0;
+  if (metrics.projectDiff > 0) return metrics.projectDiff;
+  return Math.abs(metrics.projectDiff) - allowedUnder;
 }
 
 function buildResidualResourceDeltas(
@@ -703,16 +726,16 @@ function getItemAdjustmentPriority(input: {
 }
 
 function buildSelectionReason(metrics: PlanMetrics, tolerance: number): string {
-  if (metrics.projectAbsDiff > tolerance) {
-    return `完整总价未进入容差，选择总价误差最小方案：差额${round2(metrics.projectDiff)}元`;
+  if (!isProjectWithinTargetWindow(metrics, tolerance)) {
+    return `完整总价未进入目标窗口（不高于目标，且低于目标不超过${round2(tolerance)}元），选择距离目标窗口最近方案：差额${round2(metrics.projectDiff)}元`;
   }
-  return `完整总价已进入${round2(tolerance)}元容差，优先选择范围合规${metrics.rangeCompliantCount}项、范围违规${metrics.rangeViolationCount}项、清单总偏差${round2(metrics.itemTotalAbsDiff)}元的方案`;
+  return `完整总价已进入目标窗口（比目标低${round2(Math.abs(metrics.projectDiff))}元），优先选择范围合规${metrics.rangeCompliantCount}项、范围违规${metrics.rangeViolationCount}项、清单总偏差${round2(metrics.itemTotalAbsDiff)}元的方案`;
 }
 
 function buildNoGlobalScaleReason(metrics: PlanMetrics, tolerance: number): string {
-  const totalText = metrics.projectAbsDiff <= tolerance
-    ? `完整总价已进入${round2(tolerance)}元容差`
-    : `完整总价差额${round2(metrics.projectDiff)}元，未进入${round2(tolerance)}元容差`;
+  const totalText = isProjectWithinTargetWindow(metrics, tolerance)
+    ? `完整总价已进入目标窗口（不高于目标，且低于目标不超过${round2(tolerance)}元）`
+    : `完整总价差额${round2(metrics.projectDiff)}元，未进入目标窗口（不高于目标，且低于目标不超过${round2(tolerance)}元）`;
   return `${totalText}；当前按每条清单的步骤4建议等级和工料机构成分别调价，并启用清单剩余差额迭代补偿；未启用所有资源统一乘系数的二次缩放；范围合规${metrics.rangeCompliantCount}项，范围违规${metrics.rangeViolationCount}项，清单总偏差${round2(metrics.itemTotalAbsDiff)}元`;
 }
 
@@ -974,6 +997,7 @@ function extractAdjustableResources(
 
       // 人工、材料、机械均允许参与调价；汇总类/不可竞争费用和无法识别项进入人工复核。
       const materialCheck = classifyAdjustableMaterial(code, name);
+      const defaultFixed = isDefaultFixedResource(name);
 
       if (code && code !== 'null') {
         resources.push({
@@ -985,8 +1009,9 @@ function extractAdjustableResources(
           originalPrice: price,
           adjustedPrice: price,
           isAdjustable: materialCheck.isAdjustable,
+          fixed: defaultFixed,
           reviewRequired: materialCheck.reviewRequired,
-          reviewReason: materialCheck.reason,
+          reviewReason: defaultFixed ? '临时材料费/其他材料费默认固定，人工可取消固定' : materialCheck.reason,
         });
       }
     }
@@ -995,23 +1020,27 @@ function extractAdjustableResources(
   return resources;
 }
 
-function buildFixedPriceMap(lockedPriceChanges: LockedPriceChange[]) {
-  const fixedPriceByCode = new Map<string, number>();
+function buildFixedOverrideMap(lockedPriceChanges: LockedPriceChange[]) {
+  const fixedOverrides = new Map<string, FixedPriceOverride>();
   for (const change of lockedPriceChanges) {
-    if (!change.fixed) continue;
     const price = Number(change.adjustedPrice);
     if (!Number.isFinite(price) || price <= 0) continue;
-    fixedPriceByCode.set(normalizeCode(change.code), round2(price));
+    fixedOverrides.set(normalizeCode(change.code), {
+      adjustedPrice: round2(price),
+      fixed: Boolean(change.fixed),
+    });
   }
-  return fixedPriceByCode;
+  return fixedOverrides;
 }
 
-function applyFixedPricesToResources(resources: ResourceInfo[], fixedPriceByCode: Map<string, number>) {
+function applyFixedPriceOverrides(resources: ResourceInfo[], fixedOverrides: Map<string, FixedPriceOverride>) {
   for (const resource of resources) {
-    const fixedPrice = fixedPriceByCode.get(normalizeCode(resource.code));
-    if (fixedPrice === undefined) continue;
-    resource.adjustedPrice = fixedPrice;
-    resource.fixed = true;
+    const override = fixedOverrides.get(normalizeCode(resource.code));
+    if (!override) continue;
+    resource.fixed = override.fixed;
+    if (override.fixed) {
+      resource.adjustedPrice = override.adjustedPrice;
+    }
   }
 }
 
@@ -1178,6 +1207,9 @@ function classifyAdjustableMaterial(code: string, name: string): { isAdjustable:
   if (!code) return { isAdjustable: false, reviewRequired: true, reason: '缺少编码，无法识别资源类型' };
   const trimmed = code.trim();
   const text = `${trimmed} ${name}`;
+  if (isSummaryOrAggregateResource(trimmed, name)) {
+    return { isAdjustable: false, reviewRequired: true, reason: '合计/汇总类行不是具体人材机，需人工复核' };
+  }
   if (/管理费|企业管理费|利润|风险费|规费|税金|安全文明|暂列金额|专业工程暂估价|总承包服务费|计日工|措施项目费|其他项目费/.test(text)) {
     return { isAdjustable: false, reviewRequired: true, reason: '汇总类或不可竞争费用，需人工复核' };
   }
@@ -1186,6 +1218,21 @@ function classifyAdjustableMaterial(code: string, name: string): { isAdjustable:
   if (isMaterialByName(text)) return { isAdjustable: true, reviewRequired: false, reason: '按名称识别为材料费，参与工料机调价' };
   if (/^(99|J)/i.test(trimmed)) return { isAdjustable: true, reviewRequired: false, reason: '机械费参与工料机调价' };
   return { isAdjustable: true, reviewRequired: false, reason: '未命中编码规则，按材料兜底参与工料机调价' };
+}
+
+function isSummaryOrAggregateResource(code: string, name: string): boolean {
+  const normalizedCode = normalizeText(code);
+  const normalizedName = normalizeText(name);
+  const text = `${normalizedCode}${normalizedName}`;
+  if (!normalizedName) return true;
+  if (/合计|小计|汇总|总计|累计|合价|金额|费用合计|材料费合计|人工费合计|机械费合计|价差|差额/.test(text)) return true;
+  if (/^(合计|小计|汇总|总计|材料费|人工费|机械费)$/.test(normalizedCode)) return true;
+  return false;
+}
+
+function isDefaultFixedResource(name: string): boolean {
+  const normalizedName = normalizeText(name);
+  return /临时材料费|其他材料费/.test(normalizedName);
 }
 
 function isMaterialByName(text: string): boolean {

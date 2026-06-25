@@ -238,6 +238,7 @@ export interface Step6Data {
     projectTotal?: number;
     projectDiff?: number;
     tolerance?: number;
+    toleranceRule?: string;
     baseProjectTotal?: number;
     itemTotalAbsDiff?: number;
     rangeCompliantCount?: number;

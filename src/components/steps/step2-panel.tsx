@@ -53,7 +53,7 @@ export function Step2Panel() {
   const [loading, setLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [error, setError] = useState('');
-  const [tab, setTab] = useState<'items' | 'resources'>('items');
+  const [tab, setTab] = useState<'summary' | 'items' | 'resources'>('summary');
 
   const step2Data = state.step2Data;
   const selectedFile = getSelectedFile(2);
@@ -147,37 +147,16 @@ export function Step2Panel() {
 
       {error && <div className="text-xs text-destructive p-2 bg-destructive/10 rounded">{error}</div>}
 
-      {/* 总价汇总 */}
-      {summary && (
-        <div className="border border-border rounded overflow-hidden">
-          <div className="px-3 py-2 bg-muted/40 text-sm font-medium">清单组价总价</div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="bg-muted/50">
-                  <th className="px-2 py-1.5 text-left">序号</th>
-                  <th className="px-2 py-1.5 text-left">汇总内容</th>
-                  <th className="px-2 py-1.5 text-right">清单组价金额</th>
-                </tr>
-              </thead>
-              <tbody>
-                {totalRows.map((row, index) => (
-                  <tr key={index} className="border-t border-border">
-                    <td className="px-2 py-1">{row[0]}</td>
-                    <td className="px-2 py-1">{row[1]}</td>
-                    <td className="px-2 py-1 text-right font-mono">{typeof row[2] === 'number' && row[2] > 0 ? fmt(row[2]) : '-'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
       {/* 清单数据 */}
       {step2Data && (
         <div>
           <div className="flex gap-2 mb-2">
+            <button
+              onClick={() => setTab('summary')}
+              className={`text-xs px-3 py-1 rounded ${tab === 'summary' ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}`}
+            >
+              清单组价总价
+            </button>
             <button
               onClick={() => setTab('items')}
               className={`text-xs px-3 py-1 rounded ${tab === 'items' ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}`}
@@ -192,7 +171,31 @@ export function Step2Panel() {
             </button>
           </div>
 
-          {tab === 'items' ? (
+          {tab === 'summary' ? (
+            <div className="border border-border rounded overflow-hidden">
+              <div className="px-3 py-2 bg-muted/40 text-sm font-medium">清单组价总价</div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="bg-muted/50">
+                      <th className="px-2 py-1.5 text-left">序号</th>
+                      <th className="px-2 py-1.5 text-left">汇总内容</th>
+                      <th className="px-2 py-1.5 text-right">清单组价金额</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {totalRows.map((row, index) => (
+                      <tr key={index} className="border-t border-border">
+                        <td className="px-2 py-1">{row[0]}</td>
+                        <td className="px-2 py-1">{row[1]}</td>
+                        <td className="px-2 py-1 text-right font-mono">{typeof row[2] === 'number' && row[2] > 0 ? fmt(row[2]) : '-'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : tab === 'items' ? (
             <div className="overflow-x-auto border border-border rounded">
               <table className="w-full text-xs">
                 <thead>

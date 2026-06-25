@@ -73,6 +73,9 @@ function formatTargetDiscountRange(item: AdjustedBidItem): string {
 type ResourceColumnKey = 'code' | 'name' | 'status' | 'originalPrice' | 'adjustedPrice' | 'fixed' | 'diff' | 'diffPercent';
 type ResourceFilter = { query: string; selected: string[] | null; sort: 'asc' | 'desc' | null };
 type ResourceFilterState = Partial<Record<ResourceColumnKey, ResourceFilter>>;
+type DetailColumnKey = 'category' | 'code' | 'name' | 'isScreeningItem' | 'quantity' | 'maxUnitPrice' | 'maxTotalPrice' | 'targetUnitPrice' | 'adjustedUnitPrice' | 'adjustedTotalPrice' | 'discountRate' | 'targetDiscountRange';
+type DetailFilter = { query: string; selected: string[] | null; sort: 'asc' | 'desc' | null };
+type DetailFilterState = Partial<Record<DetailColumnKey, DetailFilter>>;
 
 const RESOURCE_COLUMNS: Array<{ key: ResourceColumnKey; label: string; align?: 'left' | 'right' | 'center'; width: number }> = [
   { key: 'code', label: '编码', align: 'left', width: 120 },
@@ -83,6 +86,21 @@ const RESOURCE_COLUMNS: Array<{ key: ResourceColumnKey; label: string; align?: '
   { key: 'fixed', label: '是否固定', align: 'center', width: 100 },
   { key: 'diff', label: '差额', align: 'right', width: 110 },
   { key: 'diffPercent', label: '调价比率', align: 'right', width: 110 },
+];
+
+const DETAIL_COLUMNS: Array<{ key: DetailColumnKey; label: string; align?: 'left' | 'right' | 'center'; width: number }> = [
+  { key: 'category', label: '分部', align: 'left', width: 120 },
+  { key: 'code', label: '编码', align: 'left', width: 130 },
+  { key: 'name', label: '名称', align: 'left', width: 220 },
+  { key: 'isScreeningItem', label: '甄别', align: 'center', width: 90 },
+  { key: 'quantity', label: '工程量', align: 'right', width: 110 },
+  { key: 'maxUnitPrice', label: '限价单价', align: 'right', width: 110 },
+  { key: 'maxTotalPrice', label: '限价合价', align: 'right', width: 120 },
+  { key: 'targetUnitPrice', label: '目标单价', align: 'right', width: 110 },
+  { key: 'adjustedUnitPrice', label: '调价后单价', align: 'right', width: 120 },
+  { key: 'adjustedTotalPrice', label: '调价后合价', align: 'right', width: 130 },
+  { key: 'discountRate', label: '下浮率', align: 'right', width: 100 },
+  { key: 'targetDiscountRange', label: '目标下浮率范围', align: 'right', width: 150 },
 ];
 
 function getResourceCellValue(row: PriceChange, key: ResourceColumnKey): string {
@@ -104,15 +122,42 @@ function compareResourceValues(a: PriceChange, b: PriceChange, key: ResourceColu
   return av.localeCompare(bv, 'zh-CN');
 }
 
+function getDetailCellValue(row: AdjustedBidItem, key: DetailColumnKey): string {
+  if (key === 'isScreeningItem') return row.isScreeningItem ? '是' : '否';
+  if (key === 'discountRate') return `${(row.discountRate * 100).toFixed(2)}%`;
+  if (key === 'targetDiscountRange') return formatTargetDiscountRange(row);
+  return String(row[key] ?? '');
+}
+
+function compareDetailValues(a: AdjustedBidItem, b: AdjustedBidItem, key: DetailColumnKey) {
+  if (['quantity', 'maxUnitPrice', 'maxTotalPrice', 'targetUnitPrice', 'adjustedUnitPrice', 'adjustedTotalPrice', 'discountRate'].includes(key)) {
+    return (Number(a[key as keyof AdjustedBidItem]) || 0) - (Number(b[key as keyof AdjustedBidItem]) || 0);
+  }
+  return getDetailCellValue(a, key).localeCompare(getDetailCellValue(b, key), 'zh-CN');
+}
+
+function isDisplayableResourceRow(row: PriceChange): boolean {
+  const text = `${row.code ?? ''}${row.name ?? ''}${row.reviewReason ?? ''}`.replace(/\s+/g, '');
+  if (!text) return false;
+  return !/合计|小计|汇总|总计|累计|材料费合计|人工费合计|机械费合计/.test(text);
+}
+
 export function Step6Panel() {
   const { state, updateState, getSelectedFile } = useAppState();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [resultTab, setResultTab] = useState<'resources' | 'pricing'>('pricing');
+  const [resultTab, setResultTab] = useState<'summary' | 'details' | 'resources'>('summary');
   const [resourceFilters, setResourceFilters] = useState<ResourceFilterState>({});
+  const [draftResourceFilters, setDraftResourceFilters] = useState<ResourceFilterState>({});
   const [openResourceFilter, setOpenResourceFilter] = useState<ResourceColumnKey | null>(null);
+  const [detailFilters, setDetailFilters] = useState<DetailFilterState>({});
+  const [draftDetailFilters, setDraftDetailFilters] = useState<DetailFilterState>({});
+  const [openDetailFilter, setOpenDetailFilter] = useState<DetailColumnKey | null>(null);
   const [resourceColumnWidths, setResourceColumnWidths] = useState<Record<ResourceColumnKey, number>>(() => (
     Object.fromEntries(RESOURCE_COLUMNS.map((column) => [column.key, column.width])) as Record<ResourceColumnKey, number>
+  ));
+  const [detailColumnWidths, setDetailColumnWidths] = useState<Record<DetailColumnKey, number>>(() => (
+    Object.fromEntries(DETAIL_COLUMNS.map((column) => [column.key, column.width])) as Record<DetailColumnKey, number>
   ));
 
   const step5Data = state.step5Data;
@@ -122,15 +167,17 @@ export function Step6Panel() {
   const selectedFile = selectedOverrideFile ?? selectedStep2File;
 
   useEffect(() => {
-    if (!openResourceFilter) return;
+    if (!openResourceFilter && !openDetailFilter) return;
     const handlePointerDown = (event: MouseEvent) => {
       const target = event.target as HTMLElement | null;
       if (target?.closest('[data-resource-filter-root="true"]')) return;
+      if (target?.closest('[data-detail-filter-root="true"]')) return;
       setOpenResourceFilter(null);
+      setOpenDetailFilter(null);
     };
     document.addEventListener('mousedown', handlePointerDown);
     return () => document.removeEventListener('mousedown', handlePointerDown);
-  }, [openResourceFilter]);
+  }, [openResourceFilter, openDetailFilter]);
 
   const handleMaterialPricing = useCallback(async () => {
     if (!selectedFile) {
@@ -151,15 +198,14 @@ export function Step6Panel() {
           fileBase64: selectedFile.base64,
           balancedItems: step5Data.level2.items,
           targetProjectTotal: step5Data.level1.targetTotal,
-          tolerance: 500,
+          tolerance: 200,
           lockedPriceChanges: step6Data?.level3?.priceChanges
-            ?.filter((change) => change.fixed)
-            .map((change) => ({
+            ?.map((change) => ({
               row: change.row,
               priceCol: change.priceCol,
               code: change.code,
               adjustedPrice: change.adjustedPrice,
-              fixed: true,
+              fixed: Boolean(change.fixed),
             })) ?? [],
         }),
       });
@@ -233,7 +279,26 @@ export function Step6Panel() {
   const validation = step6Data?.validation;
   const level3 = step6Data?.level3;
   const adjustedItems = level3?.adjustedItems || [];
-  const resourceRows = level3?.priceChanges || [];
+  const filteredAdjustedItems = useMemo(() => {
+    const rows = adjustedItems.filter((row) => DETAIL_COLUMNS.every(({ key }) => {
+      const filter = detailFilters[key];
+      if (!filter) return true;
+      const value = getDetailCellValue(row, key);
+      if (filter.query && !value.toLowerCase().includes(filter.query.toLowerCase())) return false;
+      if (filter.selected && !filter.selected.includes(value)) return false;
+      return true;
+    }));
+    const sortColumn = DETAIL_COLUMNS.find(({ key }) => detailFilters[key]?.sort);
+    if (sortColumn) {
+      const sort = detailFilters[sortColumn.key]?.sort;
+      rows.sort((a, b) => compareDetailValues(a, b, sortColumn.key) * (sort === 'desc' ? -1 : 1));
+    }
+    return rows;
+  }, [adjustedItems, detailFilters]);
+  const resourceRows = useMemo(
+    () => (level3?.priceChanges || []).filter(isDisplayableResourceRow),
+    [level3?.priceChanges],
+  );
   const filteredResourceRows = useMemo(() => {
     const rows = resourceRows
       .map((row, originalIndex) => ({ row, originalIndex }))
@@ -256,25 +321,129 @@ export function Step6Panel() {
     ? buildAdjustedTotalRows(adjustedItems, step6Data.finalSummary || [], state.step3LimitSummary || {})
     : [];
 
-  const updateResourceFilter = useCallback((key: ResourceColumnKey, patch: Partial<ResourceFilter>) => {
-    setResourceFilters((current) => ({
-      ...current,
-      [key]: {
-        query: current[key]?.query ?? '',
-        selected: current[key]?.selected ?? null,
-        sort: current[key]?.sort ?? null,
-        ...patch,
-      },
-    }));
-  }, []);
-
   const clearResourceFilter = useCallback((key: ResourceColumnKey) => {
     setResourceFilters((current) => {
       const next = { ...current };
       delete next[key];
       return next;
     });
+    setDraftResourceFilters((current) => {
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
   }, []);
+
+  const clearDetailFilter = useCallback((key: DetailColumnKey) => {
+    setDetailFilters((current) => {
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+    setDraftDetailFilters((current) => {
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+  }, []);
+
+  const updateDraftResourceFilter = useCallback((key: ResourceColumnKey, patch: Partial<ResourceFilter>) => {
+    setDraftResourceFilters((current) => ({
+      ...current,
+      [key]: {
+        query: current[key]?.query ?? resourceFilters[key]?.query ?? '',
+        selected: current[key]?.selected ?? resourceFilters[key]?.selected ?? null,
+        sort: current[key]?.sort ?? resourceFilters[key]?.sort ?? null,
+        ...patch,
+      },
+    }));
+  }, [resourceFilters]);
+
+  const updateDraftDetailFilter = useCallback((key: DetailColumnKey, patch: Partial<DetailFilter>) => {
+    setDraftDetailFilters((current) => ({
+      ...current,
+      [key]: {
+        query: current[key]?.query ?? detailFilters[key]?.query ?? '',
+        selected: current[key]?.selected ?? detailFilters[key]?.selected ?? null,
+        sort: current[key]?.sort ?? detailFilters[key]?.sort ?? null,
+        ...patch,
+      },
+    }));
+  }, [detailFilters]);
+
+  const toggleResourceFilter = useCallback((key: ResourceColumnKey) => {
+    if (openResourceFilter === key) {
+      setOpenResourceFilter(null);
+      return;
+    }
+    setDraftResourceFilters((current) => ({
+      ...current,
+      [key]: {
+        query: resourceFilters[key]?.query ?? '',
+        selected: resourceFilters[key]?.selected ?? null,
+        sort: resourceFilters[key]?.sort ?? null,
+      },
+    }));
+    setOpenResourceFilter(key);
+  }, [openResourceFilter, resourceFilters]);
+
+  const toggleDetailFilter = useCallback((key: DetailColumnKey) => {
+    if (openDetailFilter === key) {
+      setOpenDetailFilter(null);
+      return;
+    }
+    setDraftDetailFilters((current) => ({
+      ...current,
+      [key]: {
+        query: detailFilters[key]?.query ?? '',
+        selected: detailFilters[key]?.selected ?? null,
+        sort: detailFilters[key]?.sort ?? null,
+      },
+    }));
+    setOpenDetailFilter(key);
+  }, [openDetailFilter, detailFilters]);
+
+  const confirmResourceFilter = useCallback((key: ResourceColumnKey, allValues: string[]) => {
+    const draft = draftResourceFilters[key] ?? resourceFilters[key] ?? { query: '', selected: null, sort: null };
+    const selected = draft.selected && draft.selected.length === allValues.length ? null : draft.selected;
+    const normalized: ResourceFilter = {
+      query: draft.query?.trim() ?? '',
+      selected,
+      sort: draft.sort ?? null,
+    };
+
+    setResourceFilters((current) => {
+      const next = { ...current };
+      if (!normalized.query && !normalized.selected && !normalized.sort) {
+        delete next[key];
+      } else {
+        next[key] = normalized;
+      }
+      return next;
+    });
+    setOpenResourceFilter(null);
+  }, [draftResourceFilters, resourceFilters]);
+
+  const confirmDetailFilter = useCallback((key: DetailColumnKey, allValues: string[]) => {
+    const draft = draftDetailFilters[key] ?? detailFilters[key] ?? { query: '', selected: null, sort: null };
+    const selected = draft.selected && draft.selected.length === allValues.length ? null : draft.selected;
+    const normalized: DetailFilter = {
+      query: draft.query?.trim() ?? '',
+      selected,
+      sort: draft.sort ?? null,
+    };
+
+    setDetailFilters((current) => {
+      const next = { ...current };
+      if (!normalized.query && !normalized.selected && !normalized.sort) {
+        delete next[key];
+      } else {
+        next[key] = normalized;
+      }
+      return next;
+    });
+    setOpenDetailFilter(null);
+  }, [draftDetailFilters, detailFilters]);
 
   const setAllFixed = useCallback((fixed: boolean) => {
     if (!step6Data?.level3?.priceChanges) return;
@@ -306,13 +475,31 @@ export function Step6Panel() {
     document.addEventListener('mouseup', handleMouseUp);
   }, [resourceColumnWidths]);
 
+  const startDetailColumnResize = useCallback((key: DetailColumnKey, event: ReactMouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const startX = event.clientX;
+    const startWidth = detailColumnWidths[key] ?? DETAIL_COLUMNS.find((column) => column.key === key)?.width ?? 120;
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      const nextWidth = Math.max(70, startWidth + moveEvent.clientX - startX);
+      setDetailColumnWidths((current) => ({ ...current, [key]: nextWidth }));
+    };
+    const handleMouseUp = () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  }, [detailColumnWidths]);
+
   const renderResourceFilterHeader = (column: typeof RESOURCE_COLUMNS[number]) => {
     const filter = resourceFilters[column.key];
+    const draftFilter = draftResourceFilters[column.key] ?? filter;
     const values = Array.from(new Set(resourceRows.map((row) => getResourceCellValue(row, column.key))))
       .filter((value) => value !== '')
       .sort((a, b) => a.localeCompare(b, 'zh-CN'));
-    const selected = filter?.selected ?? values;
-    const query = filter?.query ?? '';
+    const selected = draftFilter?.selected ?? values;
+    const query = draftFilter?.query ?? '';
     const visibleValues = values.filter((value) => !query || value.toLowerCase().includes(query.toLowerCase()));
     const active = Boolean(filter?.query || filter?.selected || filter?.sort);
 
@@ -327,7 +514,7 @@ export function Step6Panel() {
           <button
             type="button"
             aria-label={`${column.label}筛选排序`}
-            onClick={() => setOpenResourceFilter(openResourceFilter === column.key ? null : column.key)}
+            onClick={() => toggleResourceFilter(column.key)}
             className={`inline-flex h-5 w-5 items-center justify-center rounded border border-border bg-background text-[10px] shadow-sm hover:bg-muted ${active ? 'border-primary text-primary' : 'text-muted-foreground'}`}
           >
             {filter?.sort === 'asc' ? '↑' : filter?.sort === 'desc' ? '↓' : '▼'}
@@ -340,19 +527,19 @@ export function Step6Panel() {
             style={{ width: 280, height: 340 }}
           >
             <div className="mb-2 flex gap-1">
-              <button type="button" className="rounded bg-muted px-2 py-1 text-[11px]" onClick={() => updateResourceFilter(column.key, { sort: 'asc' })}>升序</button>
-              <button type="button" className="rounded bg-muted px-2 py-1 text-[11px]" onClick={() => updateResourceFilter(column.key, { sort: 'desc' })}>降序</button>
-              <button type="button" className="rounded bg-muted px-2 py-1 text-[11px]" onClick={() => updateResourceFilter(column.key, { sort: null })}>清排序</button>
+              <button type="button" className="rounded bg-muted px-2 py-1 text-[11px]" onClick={() => updateDraftResourceFilter(column.key, { sort: 'asc' })}>升序</button>
+              <button type="button" className="rounded bg-muted px-2 py-1 text-[11px]" onClick={() => updateDraftResourceFilter(column.key, { sort: 'desc' })}>降序</button>
+              <button type="button" className="rounded bg-muted px-2 py-1 text-[11px]" onClick={() => updateDraftResourceFilter(column.key, { sort: null })}>清排序</button>
             </div>
             <input
               value={query}
-              onChange={(event) => updateResourceFilter(column.key, { query: event.target.value })}
+              onChange={(event) => updateDraftResourceFilter(column.key, { query: event.target.value })}
               placeholder="输入文字筛选"
               className="mb-2 w-full rounded border border-border px-2 py-1 text-xs"
             />
             <div className="mb-2 flex gap-1">
-              <button type="button" className="rounded bg-muted px-2 py-1 text-[11px]" onClick={() => updateResourceFilter(column.key, { selected: values })}>全选</button>
-              <button type="button" className="rounded bg-muted px-2 py-1 text-[11px]" onClick={() => updateResourceFilter(column.key, { selected: [] })}>取消全选</button>
+              <button type="button" className="rounded bg-muted px-2 py-1 text-[11px]" onClick={() => updateDraftResourceFilter(column.key, { selected: values })}>全选</button>
+              <button type="button" className="rounded bg-muted px-2 py-1 text-[11px]" onClick={() => updateDraftResourceFilter(column.key, { selected: [] })}>取消全选</button>
               <button type="button" className="rounded bg-muted px-2 py-1 text-[11px]" onClick={() => clearResourceFilter(column.key)}>清除</button>
             </div>
             <div className="min-h-0 flex-1 space-y-1 overflow-auto pr-1">
@@ -365,7 +552,7 @@ export function Step6Panel() {
                       const nextSelected = event.target.checked
                         ? Array.from(new Set([...selected, value]))
                         : selected.filter((item) => item !== value);
-                      updateResourceFilter(column.key, { selected: nextSelected });
+                      updateDraftResourceFilter(column.key, { selected: nextSelected });
                     }}
                   />
                   <span className="truncate" title={value}>{value}</span>
@@ -374,7 +561,7 @@ export function Step6Panel() {
             </div>
             <div className="mt-2 flex justify-end gap-2 border-t border-border pt-2">
               <button type="button" className="rounded bg-muted px-2 py-1 text-[11px]" onClick={() => clearResourceFilter(column.key)}>清空筛选</button>
-              <button type="button" className="rounded bg-primary px-2 py-1 text-[11px] text-primary-foreground" onClick={() => setOpenResourceFilter(null)}>确定</button>
+              <button type="button" className="rounded bg-primary px-2 py-1 text-[11px] text-primary-foreground" onClick={() => confirmResourceFilter(column.key, values)}>确定</button>
             </div>
           </div>
         )}
@@ -383,6 +570,89 @@ export function Step6Panel() {
           aria-label={`${column.label}列宽调整`}
           className="absolute right-0 top-0 h-full w-1 cursor-col-resize hover:bg-primary/50"
           onMouseDown={(event) => startResourceColumnResize(column.key, event)}
+        />
+      </th>
+    );
+  };
+
+  const renderDetailFilterHeader = (column: typeof DETAIL_COLUMNS[number]) => {
+    const filter = detailFilters[column.key];
+    const draftFilter = draftDetailFilters[column.key] ?? filter;
+    const values = Array.from(new Set(adjustedItems.map((row) => getDetailCellValue(row, column.key))))
+      .filter((value) => value !== '')
+      .sort((a, b) => a.localeCompare(b, 'zh-CN'));
+    const selected = draftFilter?.selected ?? values;
+    const query = draftFilter?.query ?? '';
+    const visibleValues = values.filter((value) => !query || value.toLowerCase().includes(query.toLowerCase()));
+    const active = Boolean(filter?.query || filter?.selected || filter?.sort);
+
+    return (
+      <th
+        key={column.key}
+        className={`relative px-2 py-1.5 ${column.align === 'right' ? 'text-right' : column.align === 'center' ? 'text-center' : 'text-left'}`}
+        style={{ width: detailColumnWidths[column.key], minWidth: detailColumnWidths[column.key] }}
+      >
+        <div className={`flex items-center gap-1 ${column.align === 'right' ? 'justify-end' : column.align === 'center' ? 'justify-center' : 'justify-start'}`}>
+          <span className={active ? 'text-primary font-semibold' : ''}>{column.label}</span>
+          <button
+            type="button"
+            aria-label={`${column.label}筛选排序`}
+            onClick={() => toggleDetailFilter(column.key)}
+            className={`inline-flex h-5 w-5 items-center justify-center rounded border border-border bg-background text-[10px] shadow-sm hover:bg-muted ${active ? 'border-primary text-primary' : 'text-muted-foreground'}`}
+          >
+            {filter?.sort === 'asc' ? '↑' : filter?.sort === 'desc' ? '↓' : '▼'}
+          </button>
+        </div>
+        {openDetailFilter === column.key && (
+          <div
+            data-detail-filter-root="true"
+            className={`absolute z-20 mt-1 flex min-h-56 min-w-64 resize flex-col overflow-auto rounded border border-border bg-background p-2 text-left shadow-lg ${column.align === 'right' ? 'right-2' : 'left-2'}`}
+            style={{ width: 280, height: 340 }}
+          >
+            <div className="mb-2 flex gap-1">
+              <button type="button" className="rounded bg-muted px-2 py-1 text-[11px]" onClick={() => updateDraftDetailFilter(column.key, { sort: 'asc' })}>升序</button>
+              <button type="button" className="rounded bg-muted px-2 py-1 text-[11px]" onClick={() => updateDraftDetailFilter(column.key, { sort: 'desc' })}>降序</button>
+              <button type="button" className="rounded bg-muted px-2 py-1 text-[11px]" onClick={() => updateDraftDetailFilter(column.key, { sort: null })}>清排序</button>
+            </div>
+            <input
+              value={query}
+              onChange={(event) => updateDraftDetailFilter(column.key, { query: event.target.value })}
+              placeholder="输入文字筛选"
+              className="mb-2 w-full rounded border border-border px-2 py-1 text-xs"
+            />
+            <div className="mb-2 flex gap-1">
+              <button type="button" className="rounded bg-muted px-2 py-1 text-[11px]" onClick={() => updateDraftDetailFilter(column.key, { selected: values })}>全选</button>
+              <button type="button" className="rounded bg-muted px-2 py-1 text-[11px]" onClick={() => updateDraftDetailFilter(column.key, { selected: [] })}>取消全选</button>
+              <button type="button" className="rounded bg-muted px-2 py-1 text-[11px]" onClick={() => clearDetailFilter(column.key)}>清除</button>
+            </div>
+            <div className="min-h-0 flex-1 space-y-1 overflow-auto pr-1">
+              {visibleValues.map((value) => (
+                <label key={value} className="flex items-center gap-2 text-xs">
+                  <input
+                    type="checkbox"
+                    checked={selected.includes(value)}
+                    onChange={(event) => {
+                      const nextSelected = event.target.checked
+                        ? Array.from(new Set([...selected, value]))
+                        : selected.filter((item) => item !== value);
+                      updateDraftDetailFilter(column.key, { selected: nextSelected });
+                    }}
+                  />
+                  <span className="truncate" title={value}>{value}</span>
+                </label>
+              ))}
+            </div>
+            <div className="mt-2 flex justify-end gap-2 border-t border-border pt-2">
+              <button type="button" className="rounded bg-muted px-2 py-1 text-[11px]" onClick={() => clearDetailFilter(column.key)}>清空筛选</button>
+              <button type="button" className="rounded bg-primary px-2 py-1 text-[11px] text-primary-foreground" onClick={() => confirmDetailFilter(column.key, values)}>确定</button>
+            </div>
+          </div>
+        )}
+        <span
+          role="separator"
+          aria-label={`${column.label}列宽调整`}
+          className="absolute right-0 top-0 h-full w-1 cursor-col-resize hover:bg-primary/50"
+          onMouseDown={(event) => startDetailColumnResize(column.key, event)}
         />
       </th>
     );
@@ -448,12 +718,15 @@ export function Step6Panel() {
             {validation.projectDiff !== undefined && (
               <div>
                 完整总价差：
-                <span className={`font-mono ${Math.abs(validation.projectDiff) <= 500 ? 'text-green-600 font-bold' : 'text-red-600 font-bold'}`}>
+                <span className={`font-mono ${validation.projectDiff <= 0 && Math.abs(validation.projectDiff) <= (validation.tolerance ?? 200) ? 'text-green-600 font-bold' : 'text-red-600 font-bold'}`}>
                   {' '}{fmt(validation.projectDiff)}元
                 </span>
               </div>
             )}
-            <div>允许总价误差：<span className="font-mono">{fmt(validation.tolerance ?? 500)}</span>元</div>
+            <div>目标总价窗口：<span className="font-mono">低于目标 0 ~ {fmt(validation.tolerance ?? 200)} 元</span></div>
+            {validation.toleranceRule && (
+              <div className="col-span-2 text-muted-foreground">验收规则：{validation.toleranceRule}</div>
+            )}
             <div>统一缩放因子：<span className="font-mono">{validation.bestScaleFactor === 1 ? '未启用' : validation.bestScaleFactor?.toFixed(6)}</span></div>
             {validation.rangeCompliantCount !== undefined && (
               <div>范围合规清单：<span className="font-mono">{validation.rangeCompliantCount}</span>项</div>
@@ -475,20 +748,26 @@ export function Step6Panel() {
         <div className="space-y-3">
           <div className="flex gap-2">
             <button
-              onClick={() => setResultTab('pricing')}
-              className={`text-xs px-3 py-1.5 rounded ${resultTab === 'pricing' ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}`}
+              onClick={() => setResultTab('summary')}
+              className={`text-xs px-3 py-1.5 rounded ${resultTab === 'summary' ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}`}
             >
-              调价后清单及总价（{adjustedItems.length}项）
+              调价配平后清单总价
+            </button>
+            <button
+              onClick={() => setResultTab('details')}
+              className={`text-xs px-3 py-1.5 rounded ${resultTab === 'details' ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}`}
+            >
+              调价配平后清单明细（{filteredAdjustedItems.length}/{adjustedItems.length}项）
             </button>
             <button
               onClick={() => setResultTab('resources')}
               className={`text-xs px-3 py-1.5 rounded ${resultTab === 'resources' ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}`}
             >
-              工料机价格调整（{filteredResourceRows.length}/{level3.priceChanges.length}项）
+              工料机价格调整（{filteredResourceRows.length}/{resourceRows.length}项）
             </button>
           </div>
 
-          {resultTab === 'pricing' ? (
+          {resultTab === 'summary' ? (
             <div className="space-y-4">
               <div className="border border-border rounded overflow-hidden">
                 <div className="px-3 py-2 bg-muted/40 text-sm font-medium">调价配平后清单总价</div>
@@ -519,48 +798,63 @@ export function Step6Panel() {
                   </table>
                 </div>
               </div>
-
+            </div>
+          ) : resultTab === 'details' ? (
+            <div className="space-y-4">
+              <div className="flex justify-end">
+                <button type="button" onClick={() => setDetailFilters({})} className="rounded bg-muted px-2 py-1 text-xs hover:bg-muted/80">
+                  清除全部筛选
+                </button>
+              </div>
               <div className="border border-border rounded overflow-hidden">
                 <div className="px-3 py-2 bg-muted/40 text-sm font-medium">调价配平后清单明细</div>
                 <div className="overflow-x-auto">
-                  <table className="w-full text-xs">
+                  <table
+                    className="text-xs"
+                    style={{
+                      tableLayout: 'fixed',
+                      width: DETAIL_COLUMNS.reduce((sum, column) => sum + (detailColumnWidths[column.key] ?? column.width), 0),
+                    }}
+                  >
+                    <colgroup>
+                      {DETAIL_COLUMNS.map((column) => (
+                        <col key={column.key} style={{ width: detailColumnWidths[column.key] ?? column.width }} />
+                      ))}
+                    </colgroup>
                     <thead>
                       <tr className="bg-muted/50">
-                        <th className="px-2 py-1.5 text-left">分部</th>
-                        <th className="px-2 py-1.5 text-left">编码</th>
-                        <th className="px-2 py-1.5 text-left">名称</th>
-                        <th className="px-2 py-1.5 text-center">甄别</th>
-                        <th className="px-2 py-1.5 text-right">工程量</th>
-                        <th className="px-2 py-1.5 text-right">限价单价</th>
-                        <th className="px-2 py-1.5 text-right">限价合价</th>
-                        <th className="px-2 py-1.5 text-right">目标单价</th>
-                        <th className="px-2 py-1.5 text-right">调价后单价</th>
-                        <th className="px-2 py-1.5 text-right">调价后合价</th>
-                        <th className="px-2 py-1.5 text-right">下浮率</th>
-                        <th className="px-2 py-1.5 text-right">目标下浮率范围</th>
+                        {DETAIL_COLUMNS.map(renderDetailFilterHeader)}
                       </tr>
                     </thead>
                     <tbody>
-                      {adjustedItems.map((item) => (
-                        <tr
-                          key={`${item.category}-${item.row}`}
-                          className={`border-t border-border ${item.rangeCompliant === false ? 'bg-yellow-50' : ''}`}
-                          title={item.rangeCompliant === false ? '下浮率未在目标下浮率范围内' : undefined}
-                        >
-                          <td className="px-2 py-1">{item.category}</td>
-                          <td className="px-2 py-1 font-mono">{item.code}</td>
-                          <td className="px-2 py-1">{item.name}</td>
-                          <td className="px-2 py-1 text-center">{item.isScreeningItem ? '是' : '否'}</td>
-                          <td className="px-2 py-1 text-right font-mono">{fmt(item.quantity)}</td>
-                          <td className="px-2 py-1 text-right font-mono">{fmt(item.maxUnitPrice)}</td>
-                          <td className="px-2 py-1 text-right font-mono">{fmt(item.maxTotalPrice)}</td>
-                          <td className="px-2 py-1 text-right font-mono">{fmt(item.targetUnitPrice)}</td>
-                          <td className="px-2 py-1 text-right font-mono">{fmt(item.adjustedUnitPrice)}</td>
-                          <td className="px-2 py-1 text-right font-mono">{fmt(item.adjustedTotalPrice)}</td>
-                          <td className="px-2 py-1 text-right font-mono">{(item.discountRate * 100).toFixed(2)}%</td>
-                          <td className="px-2 py-1 text-right font-mono">{formatTargetDiscountRange(item)}</td>
+                      {filteredAdjustedItems.length > 0 ? (
+                        filteredAdjustedItems.map((item) => (
+                          <tr
+                            key={`${item.category}-${item.row}`}
+                            className={`border-t border-border ${item.rangeCompliant === false ? 'bg-yellow-50' : ''}`}
+                            title={item.rangeCompliant === false ? '下浮率未在目标下浮率范围内' : undefined}
+                          >
+                            <td className="px-2 py-1 whitespace-normal break-words">{item.category}</td>
+                            <td className="px-2 py-1 font-mono whitespace-normal break-words">{item.code}</td>
+                            <td className="px-2 py-1 whitespace-normal break-words">{item.name}</td>
+                            <td className="px-2 py-1 text-center">{item.isScreeningItem ? '是' : '否'}</td>
+                            <td className="px-2 py-1 text-right font-mono">{fmt(item.quantity)}</td>
+                            <td className="px-2 py-1 text-right font-mono">{fmt(item.maxUnitPrice)}</td>
+                            <td className="px-2 py-1 text-right font-mono">{fmt(item.maxTotalPrice)}</td>
+                            <td className="px-2 py-1 text-right font-mono">{fmt(item.targetUnitPrice)}</td>
+                            <td className="px-2 py-1 text-right font-mono">{fmt(item.adjustedUnitPrice)}</td>
+                            <td className="px-2 py-1 text-right font-mono">{fmt(item.adjustedTotalPrice)}</td>
+                            <td className="px-2 py-1 text-right font-mono">{(item.discountRate * 100).toFixed(2)}%</td>
+                            <td className="px-2 py-1 text-right font-mono whitespace-normal break-words">{formatTargetDiscountRange(item)}</td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr className="border-t border-border">
+                          <td colSpan={DETAIL_COLUMNS.length} className="px-3 py-6 text-center text-muted-foreground">
+                            没有符合当前筛选条件的清单明细。
+                          </td>
                         </tr>
-                      ))}
+                      )}
                     </tbody>
                   </table>
                 </div>
